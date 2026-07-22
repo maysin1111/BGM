@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+# test_drive_forward.py
+# Drive all 4 omni wheels forward for 5 seconds (no steering).
+# Repository: https://github.com/maysin1111/BGM
+#
+# Edit MOTOR_PINS (BCM) to match your wiring before running.
+
+import time
+import RPi.GPIO as GPIO
+
+REPO_URL = "https://github.com/maysin1111/BGM"
+
+# --- Robot / motor config (edit to match your wiring) ---
+WHEEL_DIAMETER_MM = 60    # informational only
+MOTOR_RPM = 205           # informational only
+DRIVE_TIME_S = 5.0        # drive forward duration
+PWM_FREQUENCY = 1000      # Hz for PWM
+DRIVE_SPEED_PERCENT = 80  # duty cycle (0-100) while driving
+
+# BCM pin mapping: each motor uses IN1, IN2 for direction and ENA for PWM.
+MOTOR_PINS = {
+    "M1": {"in1": 17, "in2": 27, "ena": 22},  # front left
+    "M2": {"in1": 5,  "in2": 6,  "ena": 13},  # back  left
+    "M3": {"in1": 19, "in2": 26, "ena": 20},  # front right
+    "M4": {"in1": 21, "in2": 16, "ena": 12},  # back  right
+}
+
+# If wiring causes a motor to run opposite when requested "forward", set True.
+INVERT = {"M1": False, "M2": False, "M3": True, "M4": True}
+
+GPIO.setmode(GPIO.BCM)
+GPIO.setwarnings(False)
+
+pwm_objects = {}
+
+def setup_gpio():
+    for m, pins in MOTOR_PINS.items():
+        GPIO.setup(pins["in1"], GPIO.OUT)
+        GPIO.setup(pins["in2"], GPIO.OUT)
+        GPIO.setup(pins["ena"], GPIO.OUT)
+        GPIO.output(pins["in1"], GPIO.LOW)
+        GPIO.output(pins["in2"], GPIO.LOW)
+        pwm = GPIO.PWM(pins["ena"], PWM_FREQUENCY)
+        pwm.start(0.0)
+        pwm_objects[m] = pwm
+
+def set_motor_direction(motor_name, forward=True):
+    pins = MOTOR_PINS[motor_name]
+    eff_forward = not forward if INVERT.get(motor_name, False) else forward
+    if eff_forward:
+        GPIO.output(pins["in1"], GPIO.HIGH)
+        GPIO.output(pins["in2"], GPIO.LOW)
+    else:
+        GPIO.output(pins["in1"], GPIO.LOW)
+        GPIO.output(pins["in2"], GPIO.HIGH)
+
+def set_motor_speed(motor_name, percent):
+    pwm = pwm_objects[motor_name]
+    pwm.ChangeDutyCycle(max(0.0, min(100.0, percent)))
+
+def stop_all_motors():
+    for m, pins in MOTOR_PINS.items():
+        try:
+            pwm_objects[m].ChangeDutyCycle(0)
+        except Exception:
+            pass
+        GPIO.output(pins["in1"], GPIO.LOW)
+        GPIO.output(pins["in2"], GPIO.LOW)
+
+if __name__ == "__main__":
+    try:
+        print(f"Repository: {REPO_URL}")
+        setup_gpio()
+        print("Starting forward drive test. Make sure wheels are free and area is clear.")
+        # Set all motors to forward and run
+        for m in MOTOR_PINS.keys():
+            set_motor_direction(m, forward=True)
+            set_motor_speed(m, DRIVE_SPEED_PERCENT)
+
+        time.sleep(DRIVE_TIME_S)
+
+        # Stop motors
+        stop_all_motors()
+        print("Drive complete — motors stopped.")
+
+    finally:
+        # Ensure PWM stopped and GPIO cleaned up
+        for pwm in pwm_objects.values():
+            try:
+                pwm.ChangeDutyCycle(0)
+                pwm.stop()
+            except Exception:
+                pass
+        GPIO.cleanup()
+        print("GPIO cleaned up.")
