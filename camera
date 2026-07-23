@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""
+Camera feed display for Raspberry Pi
+Displays live video feed from the pi camera at 5 FPS
+Works with YAHBOOM motor controller setup
+"""
+
+import cv2
+import time
+from threading import Thread
+import sys
+
+class CameraFeed:
+    def __init__(self, fps=5, display_width=640, display_height=480):
+        """
+        Initialize camera feed
+        
+        Args:
+            fps: Frames per second (default: 5)
+            display_width: Display window width
+            display_height: Display window height
+        """
+        self.fps = fps
+        self.frame_time = 1.0 / fps
+        self.display_width = display_width
+        self.display_height = display_height
+        
+        # Try to open camera (0 is typically the default camera on Raspberry Pi)
+        self.cap = cv2.VideoCapture(0)
+        
+        if not self.cap.isOpened():
+            print("Error: Could not open camera")
+            sys.exit(1)
+        
+        # Set camera properties for better performance on Raspberry Pi
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        self.cap.set(cv2.CAP_PROP_FPS, fps)
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Reduce buffer to minimize lag
+        
+        self.running = False
+        
+    def run(self):
+        """Main camera feed loop"""
+        self.running = True
+        cv2.namedWindow('Robot Camera Feed', cv2.WINDOW_NORMAL)
+        cv2.resizeWindow('Robot Camera Feed', self.display_width, self.display_height)
+        
+        frame_count = 0
+        start_time = time.time()
+        
+        try:
+            while self.running:
+                frame_start = time.time()
+                
+                # Capture frame
+                ret, frame = self.cap.read()
+                
+                if not ret:
+                    print("Error: Failed to read frame")
+                    break
+                
+                # Resize frame for display
+                frame = cv2.resize(frame, (self.display_width, self.display_height))
+                
+                # Add FPS counter to frame
+                frame_count += 1
+                elapsed = time.time() - start_time
+                current_fps = frame_count / elapsed if elapsed > 0 else 0
+                
+                cv2.putText(frame, f'FPS: {current_fps:.1f}', (10, 30),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                
+                # Display frame
+                cv2.imshow('Robot Camera Feed', frame)
+                
+                # Handle key press (press 'q' to quit)
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
+                    break
+                
+                # Maintain target FPS
+                frame_elapsed = time.time() - frame_start
+                if frame_elapsed < self.frame_time:
+                    time.sleep(self.frame_time - frame_elapsed)
+                    
+        except KeyboardInterrupt:
+            print("\nCamera feed interrupted by user")
+        finally:
+            self.stop()
+    
+    def stop(self):
+        """Stop camera feed and clean up"""
+        self.running = False
+        self.cap.release()
+        cv2.destroyAllWindows()
+        print("Camera feed stopped")
+
+if __name__ == "__main__":
+    print("Starting camera feed at 5 FPS...")
+    print("Press 'q' to quit or Ctrl+C to interrupt")
+    
+    camera = CameraFeed(fps=5, display_width=640, display_height=480)
+    camera.run()
