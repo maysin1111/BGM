@@ -1,0 +1,59 @@
+import keyboard
+
+def forward():
+    print("Forward")
+
+def backward():
+    print("Backward")
+
+def left():
+    print("Strafe Left")
+
+def right():
+    print("Strafe Right")
+
+def rotate_left():
+    print("Rotate Left")
+
+def rotate_right():
+    print("Rotate Right")
+
+def stop():
+    print("Stop")
+
+print("Controls:")
+print("W = Forward")
+print("S = Backward")
+print("A = Left")
+print("D = Right")
+print("Q = Rotate Left")
+print("E = Rotate Right")
+print("X = Stop")
+print("ESC = Quit")
+
+while True:
+
+    if keyboard.is_pressed('w'):
+        forward()
+
+    elif keyboard.is_pressed('s'):
+        backward()
+
+    elif keyboard.is_pressed('a'):
+        left()
+
+    elif keyboard.is_pressed('d'):
+        right()
+
+    elif keyboard.is_pressed('q'):
+        rotate_left()
+
+    elif keyboard.is_pressed('e'):
+        rotate_right()
+
+    elif keyboard.is_pressed('x'):
+        stop()
+
+    elif keyboard.is_pressed('esc'):
+        stop()
+        break
