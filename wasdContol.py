@@ -2,7 +2,9 @@
 """
 WASD controller for a 4-motor mecanum robot (X formation) using sparkybotmini.SparkyBotMini.
 
-run in terminal via: python3 /home/pi/bgm.py/wasdContol.py
+run in terminal via:cd /home/pi/bgm
+                git pull origin main
+                python3 wasdContol.py
 
 Motor mapping:
   motor 1 = front left
