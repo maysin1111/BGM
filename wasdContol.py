@@ -67,26 +67,41 @@ def main():
 
     MAX_SPEED = max(0, min(100, args.max))
 
+    print(f"[DEBUG] Initializing SparkyBotMini with port={args.port}, baud={args.baud}, debug={args.debug}")
     robot = SparkyBotMini(port=args.port, baudrate=args.baud, debug=args.debug)
 
-    print("Connecting to SparkyBotMini on", args.port, "@", args.baud)
+    print(f"[DEBUG] Connecting to SparkyBotMini on {args.port} @ {args.baud}...")
     if not robot.connect():
         print("Failed to open serial port. Exiting.")
         sys.exit(1)
 
+    print("[DEBUG] Connection successful!")
+    
     # Ensure motors start at 0
+    print("[DEBUG] Stopping all motors...")
     stop_all(robot)
     time.sleep(0.05)
 
     # Enable auto-reporting (required for motor control)
-    print("Enabling auto-report...")
+    print("[DEBUG] Enabling auto-report...")
     robot.set_auto_report(True)
-    time.sleep(0.1)
+    time.sleep(0.2)
+    
+    # Test motors with a simple command
+    print("[DEBUG] Testing motors with a simple 50% forward command...")
+    robot.set_motor(50, 50, 50, 50)
+    time.sleep(1)
+    print("[DEBUG] Test command sent. Robot should have moved. Stopping...")
+    robot.set_motor(0, 0, 0, 0)
+    time.sleep(0.2)
 
+    print("\n=== WASD Controller Ready ===")
     print("Controls: W forward, S back, A strafe left, D strafe right, Q/E rotate, ESC to quit")
     print(f"Max speed: {MAX_SPEED}")
+    print("Press keys now...\n")
     
     last_m1, last_m2, last_m3, last_m4 = 0, 0, 0, 0
+    command_count = 0
     
     try:
         while True:
@@ -110,7 +125,7 @@ def main():
 
             # Exit on ESC
             if keyboard.is_pressed("esc"):
-                print("ESC pressed, exiting loop.")
+                print("\n[DEBUG] ESC pressed, exiting loop.")
                 break
 
             # Mecanum X-configuration mixing (uses SparkyBotMini motor ordering)
@@ -134,15 +149,15 @@ def main():
             
             try:
                 robot.set_motor(m1_clamped, m2_clamped, m3_clamped, m4_clamped)
+                command_count += 1
                 
-                # Debug output: only print when values change
+                # Debug output: print when values change
                 if (m1_clamped, m2_clamped, m3_clamped, m4_clamped) != (last_m1, last_m2, last_m3, last_m4):
-                    if args.debug or (f != 0 or s != 0 or rot != 0 or (last_m1, last_m2, last_m3, last_m4) != (0, 0, 0, 0)):
-                        print(f"Motors: M1={m1_clamped:4d}, M2={m2_clamped:4d}, M3={m3_clamped:4d}, M4={m4_clamped:4d}")
+                    print(f"[{command_count}] Motors: M1={m1_clamped:4d}, M2={m2_clamped:4d}, M3={m3_clamped:4d}, M4={m4_clamped:4d} | f={f:.0f} s={s:.0f} rot={rot:.0f}")
                     last_m1, last_m2, last_m3, last_m4 = m1_clamped, m2_clamped, m3_clamped, m4_clamped
                     
             except Exception as e:
-                print("Error sending motor command:", e)
+                print(f"[ERROR] Error sending motor command: {e}")
                 # try to stop motors and exit
                 stop_all(robot)
                 break
@@ -150,35 +165,15 @@ def main():
             time.sleep(0.03)
 
     except KeyboardInterrupt:
-        print("Interrupted by user")
+        print("\n[DEBUG] Interrupted by user")
 
     finally:
-        print("Stopping motors and disconnecting...")
+        print("[DEBUG] Stopping motors and disconnecting...")
         stop_all(robot)
         time.sleep(0.05)
         robot.disconnect()
-        print("Exited cleanly.")
+        print("[DEBUG] Exited cleanly.")
 
 
 if __name__ == "__main__":
     main()
-</parameter>
-
-Here's the updated code with all the fixes applied:
-
-**Key additions:**
-
-1. **Auto-report enabled** (line 86-88) — Required for motor control to work
-2. **Debug flag** (line 65) — Can pass `--debug` to see all serial traffic
-3. **Debug motor output** (line 131-137) — Prints motor values only when they change
-4. **Better error tracking** — Clamped values stored for comparison
-5. **Max speed display** (line 90) — Shows the configured max speed
-
-**To test it:**
-
-```bash
-# Test with verbose output to see motor commands being sent
-sudo python3 /home/pi/bgm.py/wasdContol.py --debug
-
-# Or run normally (will print motor changes):
-sudo python3 /home/pi/bgm.py/wasdContol.py
