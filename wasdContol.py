@@ -17,21 +17,22 @@ Controls:
   D = strafe right
   Q = rotate left (optional)
   E = rotate right (optional)
-  ESC or Ctrl-C = stop and exit
+  Ctrl-C = stop and exit
 
 Requirements:
   - sparkybotmini.py must be on PYTHONPATH (this repo contains it).
   - pip install pyserial
   
-Works over SSH/remote connections (Pi Connect) by reading stdin instead of using system keyboard.
+Works over SSH/remote connections (Pi Connect) by reading stdin in non-blocking mode.
 """
 
 import time
 import sys
 import argparse
 import threading
-import tty
-import termios
+import os
+import fcntl
+import select
 
 # Import the actual API from repo
 try:
@@ -48,47 +49,79 @@ input_thread_active = False
 should_exit = False
 
 
-def read_single_char():
-    """Read a single character from stdin without blocking on Enter."""
-    fd = sys.stdin.fileno()
-    old_settings = termios.tcgetattr(fd)
-    try:
-        tty.setraw(fd)
-        ch = sys.stdin.read(1)
-        return ch.lower() if ch else None
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+def set_non_blocking(fd):
+    """Set file descriptor to non-blocking mode."""
+    flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+    fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
 
 
 def input_thread_func():
-    """Background thread that reads keyboard input."""
+    """Background thread that reads keyboard input non-blocking."""
     global keys_pressed, should_exit
     
-    print("[DEBUG] Input thread started. Reading from stdin...", file=sys.stderr)
+    print("[DEBUG] Input thread started. Reading from stdin (non-blocking)...", file=sys.stderr)
+    
+    stdin_fd = sys.stdin.fileno()
+    set_non_blocking(stdin_fd)
     
     while not should_exit:
         try:
-            ch = read_single_char()
-            if ch is None:
-                continue
+            # Use select to check if data is available (with 50ms timeout)
+            ready, _, _ = select.select([stdin_fd], [], [], 0.05)
             
-            if ch == '\x1b':  # ESC key
-                keys_pressed.add('esc')
-                print(f"[KEY] Pressed: esc", file=sys.stderr)
-                time.sleep(0.1)
-                keys_pressed.discard('esc')
-                print(f"[KEY] Released: esc", file=sys.stderr)
-            elif ch == '\x03':  # Ctrl-C
-                print("\n[DEBUG] Ctrl-C detected", file=sys.stderr)
-                should_exit = True
-                break
-            elif ch in 'wsadqe':
-                keys_pressed.add(ch)
-                print(f"[KEY] Pressed: {ch}", file=sys.stderr)
+            if ready:
+                ch = sys.stdin.read(1)
+                if ch:
+                    ch_lower = ch.lower()
+                    
+                    if ch_lower == '\x03':  # Ctrl-C
+                        print("\n[DEBUG] Ctrl-C detected", file=sys.stderr)
+                        should_exit = True
+                        break
+                    elif ch_lower in 'wsadqe':
+                        if ch_lower not in keys_pressed:
+                            keys_pressed.add(ch_lower)
+                            print(f"[KEY] Pressed: {ch_lower}", file=sys.stderr)
+                    elif ch_lower == 'x':  # 'x' to exit
+                        print("\n[DEBUG] Exit key pressed", file=sys.stderr)
+                        should_exit = True
+                        break
             
+        except (IOError, OSError):
+            # Non-blocking read returned no data, that's OK
+            pass
         except Exception as e:
             print(f"[ERROR] Input thread error: {e}", file=sys.stderr)
             time.sleep(0.1)
+        
+        time.sleep(0.01)
+
+
+def key_release_monitor():
+    """Monitor and release keys after a short timeout to simulate key release."""
+    global keys_pressed
+    
+    key_timers = {}
+    
+    while not should_exit:
+        current_time = time.time()
+        keys_to_remove = []
+        
+        for key in list(keys_pressed):
+            if key not in key_timers:
+                key_timers[key] = current_time
+            
+            # Release key after 100ms if no new press detected
+            if current_time - key_timers[key] > 0.1:
+                keys_to_remove.append(key)
+        
+        for key in keys_to_remove:
+            keys_pressed.discard(key)
+            if key in key_timers:
+                del key_timers[key]
+                print(f"[KEY] Released: {key}", file=sys.stderr)
+        
+        time.sleep(0.01)
 
 
 def is_pressed(key):
@@ -150,7 +183,7 @@ def main():
     print("\n=== WASD Controller Ready (SSH/Remote Mode) ===")
     print("Controls: Press keys directly (no Enter needed)")
     print("  W = forward,  S = back,  A = strafe left,  D = strafe right")
-    print("  Q = rotate left,  E = rotate right,  Ctrl-C = quit")
+    print("  Q = rotate left,  E = rotate right,  Ctrl-C or X = quit")
     print(f"Max speed: {MAX_SPEED}")
     print("Ready for input...\n")
     
@@ -161,6 +194,11 @@ def main():
         thread.start()
         input_thread_active = True
         print("[DEBUG] Input thread started successfully!", file=sys.stderr)
+        
+        release_thread = threading.Thread(target=key_release_monitor, daemon=True)
+        release_thread.start()
+        print("[DEBUG] Key release monitor started!", file=sys.stderr)
+        
         time.sleep(0.2)
     except Exception as e:
         print(f"[ERROR] Failed to start input thread: {e}")
@@ -196,11 +234,6 @@ def main():
             if is_pressed("q"):
                 rot -= MAX_SPEED * 0.6
 
-            # Exit on ESC
-            if is_pressed("esc"):
-                print("\n[DEBUG] ESC pressed, exiting loop.")
-                break
-
             # Mecanum X-configuration mixing (uses SparkyBotMini motor ordering)
             # motor1 = front left, motor2 = back left, motor3 = front right, motor4 = back right
             m1 = f + s + rot
@@ -231,7 +264,6 @@ def main():
                     
             except Exception as e:
                 print(f"[ERROR] Error sending motor command: {e}")
-                # try to stop motors and exit
                 stop_all(robot)
                 break
 
