@@ -21,22 +21,17 @@ Controls:
 
 Requirements:
   - sparkybotmini.py must be on PYTHONPATH (this repo contains it).
-  - pip install pynput pyserial
+  - pip install pyserial
   
-NOTE: On headless/SSH systems, pynput may not work. Consider using a different approach
-or running this script on a system with a display.
+Works over SSH/remote connections (Pi Connect) by reading stdin instead of using system keyboard.
 """
 
 import time
 import sys
 import argparse
-
-try:
-    from pynput import keyboard as kb
-except Exception as e:
-    print("Missing dependency: the 'pynput' module is required. Install with: pip install pynput")
-    print("Error:", e)
-    sys.exit(1)
+import threading
+import tty
+import termios
 
 # Import the actual API from repo
 try:
@@ -49,39 +44,51 @@ except Exception as e:
 
 # Global state for key tracking
 keys_pressed = set()
-listener_active = False
-listener_error = None
+input_thread_active = False
+should_exit = False
 
 
-def on_press(key):
-    global listener_error
+def read_single_char():
+    """Read a single character from stdin without blocking on Enter."""
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
     try:
-        if hasattr(key, 'char') and key.char:
-            keys_pressed.add(key.char.lower())
-            print(f"[KEY] Pressed: {key.char.lower()}", file=sys.stderr)
-        else:
-            # Special keys (ESC, etc.)
-            key_name = key.name if hasattr(key, 'name') else str(key)
-            keys_pressed.add(key_name.lower())
-            print(f"[KEY] Pressed (special): {key_name.lower()}", file=sys.stderr)
-    except Exception as e:
-        listener_error = f"Error in on_press: {e}"
-        print(f"[ERROR] {listener_error}", file=sys.stderr)
+        tty.setraw(fd)
+        ch = sys.stdin.read(1)
+        return ch.lower() if ch else None
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
 
-def on_release(key):
-    global listener_error
-    try:
-        if hasattr(key, 'char') and key.char:
-            keys_pressed.discard(key.char.lower())
-            print(f"[KEY] Released: {key.char.lower()}", file=sys.stderr)
-        else:
-            key_name = key.name if hasattr(key, 'name') else str(key)
-            keys_pressed.discard(key_name.lower())
-            print(f"[KEY] Released (special): {key_name.lower()}", file=sys.stderr)
-    except Exception as e:
-        listener_error = f"Error in on_release: {e}"
-        print(f"[ERROR] {listener_error}", file=sys.stderr)
+def input_thread_func():
+    """Background thread that reads keyboard input."""
+    global keys_pressed, should_exit
+    
+    print("[DEBUG] Input thread started. Reading from stdin...", file=sys.stderr)
+    
+    while not should_exit:
+        try:
+            ch = read_single_char()
+            if ch is None:
+                continue
+            
+            if ch == '\x1b':  # ESC key
+                keys_pressed.add('esc')
+                print(f"[KEY] Pressed: esc", file=sys.stderr)
+                time.sleep(0.1)
+                keys_pressed.discard('esc')
+                print(f"[KEY] Released: esc", file=sys.stderr)
+            elif ch == '\x03':  # Ctrl-C
+                print("\n[DEBUG] Ctrl-C detected", file=sys.stderr)
+                should_exit = True
+                break
+            elif ch in 'wsadqe':
+                keys_pressed.add(ch)
+                print(f"[KEY] Pressed: {ch}", file=sys.stderr)
+            
+        except Exception as e:
+            print(f"[ERROR] Input thread error: {e}", file=sys.stderr)
+            time.sleep(0.1)
 
 
 def is_pressed(key):
@@ -101,7 +108,7 @@ def stop_all(robot: SparkyBotMini):
 
 
 def main():
-    global listener_active, listener_error
+    global input_thread_active, should_exit
     
     parser = argparse.ArgumentParser(description="WASD controller for SparkyBotMini mecanum (X formation).")
     parser.add_argument("--port", "-p", default="/dev/ttyUSB0", help="Serial port (default: /dev/ttyUSB0)")
@@ -140,24 +147,23 @@ def main():
     robot.set_motor(0, 0, 0, 0)
     time.sleep(0.2)
 
-    print("\n=== WASD Controller Ready ===")
-    print("Controls: W forward, S back, A strafe left, D strafe right, Q/E rotate, ESC to quit")
+    print("\n=== WASD Controller Ready (SSH/Remote Mode) ===")
+    print("Controls: Press keys directly (no Enter needed)")
+    print("  W = forward,  S = back,  A = strafe left,  D = strafe right")
+    print("  Q = rotate left,  E = rotate right,  Ctrl-C = quit")
     print(f"Max speed: {MAX_SPEED}")
-    print("*** IMPORTANT: Keep the terminal window FOCUSED/ACTIVE for key detection! ***")
-    print("*** Key press debug messages will appear on stderr below. ***\n")
+    print("Ready for input...\n")
     
-    # Start keyboard listener
-    print("[DEBUG] Starting keyboard listener...")
+    # Start input thread
+    print("[DEBUG] Starting input thread...", file=sys.stderr)
     try:
-        listener = kb.Listener(on_press=on_press, on_release=on_release)
-        listener.start()
-        listener_active = True
-        print("[DEBUG] Keyboard listener started successfully!")
-        time.sleep(0.5)
+        thread = threading.Thread(target=input_thread_func, daemon=True)
+        thread.start()
+        input_thread_active = True
+        print("[DEBUG] Input thread started successfully!", file=sys.stderr)
+        time.sleep(0.2)
     except Exception as e:
-        print(f"[ERROR] Failed to start keyboard listener: {e}")
-        print("[ERROR] This may happen on headless systems (SSH, no display).")
-        print("[ERROR] Consider running this script on a system with a display, or use a different input method.")
+        print(f"[ERROR] Failed to start input thread: {e}")
         robot.disconnect()
         sys.exit(1)
     
@@ -166,12 +172,7 @@ def main():
     last_keys_printed = set()
     
     try:
-        while True:
-            # Print listener status periodically
-            if listener_error:
-                print(f"[ERROR] Listener error detected: {listener_error}")
-                listener_error = None
-            
+        while not should_exit:
             # Print current key state if changed
             if keys_pressed != last_keys_printed:
                 print(f"[KEYS] Currently pressed: {keys_pressed if keys_pressed else '(none)'}", file=sys.stderr)
@@ -241,11 +242,10 @@ def main():
 
     finally:
         print("[DEBUG] Stopping motors and disconnecting...")
+        should_exit = True
         stop_all(robot)
         time.sleep(0.05)
         robot.disconnect()
-        if listener_active:
-            listener.stop()
         print("[DEBUG] Exited cleanly.")
 
 
