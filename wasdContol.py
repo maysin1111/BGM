@@ -2,9 +2,7 @@
 """
 WASD controller for a 4-motor mecanum robot (X formation) using sparkybotmini.SparkyBotMini.
 
-run in terminal via:cd /home/pi/bgm
-                git pull origin main
-                python3 wasdContol.py
+run in terminal via: python3 /home/pi/bgm.py/wasdContol.py
 
 Motor mapping:
   motor 1 = front left
@@ -13,30 +11,26 @@ Motor mapping:
   motor 4 = back  right
 
 Controls:
+  Type keys directly - they activate instantly:
   W = forward
   S = backward
   A = strafe left
   D = strafe right
   Q = rotate left (optional)
   E = rotate right (optional)
-  Ctrl-C = stop and exit
+  X = stop and exit
 
 Requirements:
   - sparkybotmini.py must be on PYTHONPATH (this repo contains it).
   - pip install pyserial
-  
-Works over SSH/remote connections (Pi Connect) by reading stdin in raw mode.
+
+Works over SSH/Pi Connect by simulating continuous key presses from stdin input.
 """
 
 import time
 import sys
 import argparse
 import threading
-import os
-import fcntl
-import select
-import tty
-import termios
 
 # Import the actual API from repo
 try:
@@ -49,99 +43,49 @@ except Exception as e:
 
 # Global state for key tracking
 keys_pressed = set()
-input_thread_active = False
 should_exit = False
-original_settings = None
-
-
-def set_raw_mode():
-    """Set stdin to raw mode to capture keys without Enter."""
-    global original_settings
-    fd = sys.stdin.fileno()
-    original_settings = termios.tcgetattr(fd)
-    try:
-        tty.setraw(fd)
-    except:
-        pass
-
-
-def restore_terminal():
-    """Restore terminal to original settings."""
-    global original_settings
-    if original_settings:
-        fd = sys.stdin.fileno()
-        try:
-            termios.tcsetattr(fd, termios.TCSADRAIN, original_settings)
-        except:
-            pass
 
 
 def input_thread_func():
-    """Background thread that reads keyboard input non-blocking in raw mode."""
+    """Background thread that reads keyboard input character by character."""
     global keys_pressed, should_exit
     
-    print("[DEBUG] Input thread started. Reading from stdin (raw mode, non-blocking)...", file=sys.stderr)
-    
-    stdin_fd = sys.stdin.fileno()
+    print("[DEBUG] Input thread started. Type keys directly (no Enter needed)...", file=sys.stderr)
     
     while not should_exit:
         try:
-            # Use select to check if data is available (with 50ms timeout)
-            ready, _, _ = select.select([stdin_fd], [], [], 0.05)
+            # Read one character
+            ch = sys.stdin.read(1)
             
-            if ready:
-                ch = sys.stdin.read(1)
-                if ch:
-                    ch_lower = ch.lower()
+            if not ch:
+                continue
+            
+            ch_lower = ch.lower()
+            
+            # Exit on 'x'
+            if ch_lower == 'x':
+                print("\n[DEBUG] Exit key pressed", file=sys.stderr)
+                should_exit = True
+                break
+            
+            # Add movement keys to pressed set
+            if ch_lower in 'wsadqe':
+                if ch_lower not in keys_pressed:
+                    keys_pressed.add(ch_lower)
+                    print(f"[KEY] Pressed: {ch_lower}", file=sys.stderr)
                     
-                    if ch_lower == '\x03':  # Ctrl-C
-                        print("\n[DEBUG] Ctrl-C detected", file=sys.stderr)
-                        should_exit = True
-                        break
-                    elif ch_lower in 'wsadqe':
-                        if ch_lower not in keys_pressed:
-                            keys_pressed.add(ch_lower)
-                            print(f"[KEY] Pressed: {ch_lower}", file=sys.stderr)
-                    elif ch_lower == 'x':  # 'x' to exit
-                        print("\n[DEBUG] Exit key pressed", file=sys.stderr)
-                        should_exit = True
-                        break
+                    # Hold key for 100ms then release
+                    time.sleep(0.1)
+                    keys_pressed.discard(ch_lower)
+                    print(f"[KEY] Released: {ch_lower}", file=sys.stderr)
             
-        except (IOError, OSError):
-            # Non-blocking read returned no data, that's OK
-            pass
+        except EOFError:
+            print("[DEBUG] EOF reached, exiting", file=sys.stderr)
+            should_exit = True
+            break
         except Exception as e:
             print(f"[ERROR] Input thread error: {e}", file=sys.stderr)
             time.sleep(0.1)
-        
-        time.sleep(0.01)
-
-
-def key_release_monitor():
-    """Monitor and release keys after a short timeout to simulate key release."""
-    global keys_pressed
-    
-    key_timers = {}
-    
-    while not should_exit:
-        current_time = time.time()
-        keys_to_remove = []
-        
-        for key in list(keys_pressed):
-            if key not in key_timers:
-                key_timers[key] = current_time
-            
-            # Release key after 100ms if no new press detected
-            if current_time - key_timers[key] > 0.1:
-                keys_to_remove.append(key)
-        
-        for key in keys_to_remove:
-            keys_pressed.discard(key)
-            if key in key_timers:
-                del key_timers[key]
-                print(f"[KEY] Released: {key}", file=sys.stderr)
-        
-        time.sleep(0.01)
 
 
 def is_pressed(key):
@@ -161,7 +105,7 @@ def stop_all(robot: SparkyBotMini):
 
 
 def main():
-    global input_thread_active, should_exit
+    global should_exit
     
     parser = argparse.ArgumentParser(description="WASD controller for SparkyBotMini mecanum (X formation).")
     parser.add_argument("--port", "-p", default="/dev/ttyUSB0", help="Serial port (default: /dev/ttyUSB0)")
@@ -200,33 +144,23 @@ def main():
     robot.set_motor(0, 0, 0, 0)
     time.sleep(0.2)
 
-    # Set terminal to raw mode
-    print("[DEBUG] Setting terminal to raw mode...", file=sys.stderr)
-    set_raw_mode()
-
-    print("\n=== WASD Controller Ready (SSH/Remote Mode - Raw Input) ===")
-    print("Controls: Press keys directly (no Enter needed)")
-    print("  W = forward,  S = back,  A = strafe left,  D = strafe right")
-    print("  Q = rotate left,  E = rotate right,  Ctrl-C to quit")
+    print("\n=== WASD Controller Ready (Instant Input) ===")
+    print("Type keys directly - they activate instantly (no Enter needed):")
+    print("  w = forward,  s = back,  a = strafe left,  d = strafe right")
+    print("  q = rotate left,  e = rotate right")
+    print("  x = quit")
     print(f"Max speed: {MAX_SPEED}")
-    print("Ready for input...\n")
+    print("Just type 'w' and the robot moves forward immediately!\n")
     
     # Start input thread
     print("[DEBUG] Starting input thread...", file=sys.stderr)
     try:
         thread = threading.Thread(target=input_thread_func, daemon=True)
         thread.start()
-        input_thread_active = True
         print("[DEBUG] Input thread started successfully!", file=sys.stderr)
-        
-        release_thread = threading.Thread(target=key_release_monitor, daemon=True)
-        release_thread.start()
-        print("[DEBUG] Key release monitor started!", file=sys.stderr)
-        
         time.sleep(0.2)
     except Exception as e:
         print(f"[ERROR] Failed to start input thread: {e}")
-        restore_terminal()
         robot.disconnect()
         sys.exit(1)
     
@@ -300,7 +234,6 @@ def main():
     finally:
         print("[DEBUG] Stopping motors and disconnecting...")
         should_exit = True
-        restore_terminal()
         stop_all(robot)
         time.sleep(0.05)
         robot.disconnect()
