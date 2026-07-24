@@ -23,7 +23,7 @@ Requirements:
   - sparkybotmini.py must be on PYTHONPATH (this repo contains it).
   - pip install pyserial
   
-Works over SSH/remote connections (Pi Connect) by reading stdin in non-blocking mode.
+Works over SSH/remote connections (Pi Connect) by reading stdin in raw mode.
 """
 
 import time
@@ -33,6 +33,8 @@ import threading
 import os
 import fcntl
 import select
+import tty
+import termios
 
 # Import the actual API from repo
 try:
@@ -47,22 +49,38 @@ except Exception as e:
 keys_pressed = set()
 input_thread_active = False
 should_exit = False
+original_settings = None
 
 
-def set_non_blocking(fd):
-    """Set file descriptor to non-blocking mode."""
-    flags = fcntl.fcntl(fd, fcntl.F_GETFL)
-    fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+def set_raw_mode():
+    """Set stdin to raw mode to capture keys without Enter."""
+    global original_settings
+    fd = sys.stdin.fileno()
+    original_settings = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+    except:
+        pass
+
+
+def restore_terminal():
+    """Restore terminal to original settings."""
+    global original_settings
+    if original_settings:
+        fd = sys.stdin.fileno()
+        try:
+            termios.tcsetattr(fd, termios.TCSADRAIN, original_settings)
+        except:
+            pass
 
 
 def input_thread_func():
-    """Background thread that reads keyboard input non-blocking."""
+    """Background thread that reads keyboard input non-blocking in raw mode."""
     global keys_pressed, should_exit
     
-    print("[DEBUG] Input thread started. Reading from stdin (non-blocking)...", file=sys.stderr)
+    print("[DEBUG] Input thread started. Reading from stdin (raw mode, non-blocking)...", file=sys.stderr)
     
     stdin_fd = sys.stdin.fileno()
-    set_non_blocking(stdin_fd)
     
     while not should_exit:
         try:
@@ -180,10 +198,14 @@ def main():
     robot.set_motor(0, 0, 0, 0)
     time.sleep(0.2)
 
-    print("\n=== WASD Controller Ready (SSH/Remote Mode) ===")
+    # Set terminal to raw mode
+    print("[DEBUG] Setting terminal to raw mode...", file=sys.stderr)
+    set_raw_mode()
+
+    print("\n=== WASD Controller Ready (SSH/Remote Mode - Raw Input) ===")
     print("Controls: Press keys directly (no Enter needed)")
     print("  W = forward,  S = back,  A = strafe left,  D = strafe right")
-    print("  Q = rotate left,  E = rotate right,  Ctrl-C or X = quit")
+    print("  Q = rotate left,  E = rotate right,  Ctrl-C to quit")
     print(f"Max speed: {MAX_SPEED}")
     print("Ready for input...\n")
     
@@ -202,6 +224,7 @@ def main():
         time.sleep(0.2)
     except Exception as e:
         print(f"[ERROR] Failed to start input thread: {e}")
+        restore_terminal()
         robot.disconnect()
         sys.exit(1)
     
@@ -275,6 +298,7 @@ def main():
     finally:
         print("[DEBUG] Stopping motors and disconnecting...")
         should_exit = True
+        restore_terminal()
         stop_all(robot)
         time.sleep(0.05)
         robot.disconnect()
