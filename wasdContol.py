@@ -62,11 +62,12 @@ def main():
     parser.add_argument("--port", "-p", default="/dev/ttyUSB0", help="Serial port (default: /dev/ttyUSB0)")
     parser.add_argument("--baud", "-b", type=int, default=115200, help="Baudrate (default: 115200)")
     parser.add_argument("--max", type=int, default=80, help="Maximum wheel speed (0-100). Default 80")
+    parser.add_argument("--debug", "-d", action="store_true", help="Enable debug output")
     args = parser.parse_args()
 
     MAX_SPEED = max(0, min(100, args.max))
 
-    robot = SparkyBotMini(port=args.port, baudrate=args.baud, debug=False)
+    robot = SparkyBotMini(port=args.port, baudrate=args.baud, debug=args.debug)
 
     print("Connecting to SparkyBotMini on", args.port, "@", args.baud)
     if not robot.connect():
@@ -77,7 +78,16 @@ def main():
     stop_all(robot)
     time.sleep(0.05)
 
+    # Enable auto-reporting (required for motor control)
+    print("Enabling auto-report...")
+    robot.set_auto_report(True)
+    time.sleep(0.1)
+
     print("Controls: W forward, S back, A strafe left, D strafe right, Q/E rotate, ESC to quit")
+    print(f"Max speed: {MAX_SPEED}")
+    
+    last_m1, last_m2, last_m3, last_m4 = 0, 0, 0, 0
+    
     try:
         while True:
             # components
@@ -117,8 +127,20 @@ def main():
                 m1 *= scale; m2 *= scale; m3 *= scale; m4 *= scale
 
             # Convert to ints and clamp to -100..100 which SparkyBotMini.set_motor expects
+            m1_clamped = clamp_int(m1)
+            m2_clamped = clamp_int(m2)
+            m3_clamped = clamp_int(m3)
+            m4_clamped = clamp_int(m4)
+            
             try:
-                robot.set_motor(clamp_int(m1), clamp_int(m2), clamp_int(m3), clamp_int(m4))
+                robot.set_motor(m1_clamped, m2_clamped, m3_clamped, m4_clamped)
+                
+                # Debug output: only print when values change
+                if (m1_clamped, m2_clamped, m3_clamped, m4_clamped) != (last_m1, last_m2, last_m3, last_m4):
+                    if args.debug or (f != 0 or s != 0 or rot != 0 or (last_m1, last_m2, last_m3, last_m4) != (0, 0, 0, 0)):
+                        print(f"Motors: M1={m1_clamped:4d}, M2={m2_clamped:4d}, M3={m3_clamped:4d}, M4={m4_clamped:4d}")
+                    last_m1, last_m2, last_m3, last_m4 = m1_clamped, m2_clamped, m3_clamped, m4_clamped
+                    
             except Exception as e:
                 print("Error sending motor command:", e)
                 # try to stop motors and exit
@@ -140,3 +162,23 @@ def main():
 
 if __name__ == "__main__":
     main()
+</parameter>
+
+Here's the updated code with all the fixes applied:
+
+**Key additions:**
+
+1. **Auto-report enabled** (line 86-88) — Required for motor control to work
+2. **Debug flag** (line 65) — Can pass `--debug` to see all serial traffic
+3. **Debug motor output** (line 131-137) — Prints motor values only when they change
+4. **Better error tracking** — Clamped values stored for comparison
+5. **Max speed display** (line 90) — Shows the configured max speed
+
+**To test it:**
+
+```bash
+# Test with verbose output to see motor commands being sent
+sudo python3 /home/pi/bgm.py/wasdContol.py --debug
+
+# Or run normally (will print motor changes):
+sudo python3 /home/pi/bgm.py/wasdContol.py
