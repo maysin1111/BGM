@@ -22,6 +22,9 @@ Controls:
 Requirements:
   - sparkybotmini.py must be on PYTHONPATH (this repo contains it).
   - pip install pynput pyserial
+  
+NOTE: On headless/SSH systems, pynput may not work. Consider using a different approach
+or running this script on a system with a display.
 """
 
 import time
@@ -46,32 +49,44 @@ except Exception as e:
 
 # Global state for key tracking
 keys_pressed = set()
+listener_active = False
+listener_error = None
 
 
 def on_press(key):
+    global listener_error
     try:
-        keys_pressed.add(key.char.lower())
-    except AttributeError:
-        # Special keys (ESC, etc.)
-        if key == kb.Key.esc:
-            keys_pressed.add('esc')
-        elif key == kb.Key.shift:
-            keys_pressed.add('shift')
+        if hasattr(key, 'char') and key.char:
+            keys_pressed.add(key.char.lower())
+            print(f"[KEY] Pressed: {key.char.lower()}", file=sys.stderr)
+        else:
+            # Special keys (ESC, etc.)
+            key_name = key.name if hasattr(key, 'name') else str(key)
+            keys_pressed.add(key_name.lower())
+            print(f"[KEY] Pressed (special): {key_name.lower()}", file=sys.stderr)
+    except Exception as e:
+        listener_error = f"Error in on_press: {e}"
+        print(f"[ERROR] {listener_error}", file=sys.stderr)
 
 
 def on_release(key):
+    global listener_error
     try:
-        keys_pressed.discard(key.char.lower())
-    except AttributeError:
-        if key == kb.Key.esc:
-            keys_pressed.discard('esc')
-        elif key == kb.Key.shift:
-            keys_pressed.discard('shift')
+        if hasattr(key, 'char') and key.char:
+            keys_pressed.discard(key.char.lower())
+            print(f"[KEY] Released: {key.char.lower()}", file=sys.stderr)
+        else:
+            key_name = key.name if hasattr(key, 'name') else str(key)
+            keys_pressed.discard(key_name.lower())
+            print(f"[KEY] Released (special): {key_name.lower()}", file=sys.stderr)
+    except Exception as e:
+        listener_error = f"Error in on_release: {e}"
+        print(f"[ERROR] {listener_error}", file=sys.stderr)
 
 
 def is_pressed(key):
     """Check if a key is currently pressed."""
-    return key in keys_pressed
+    return key.lower() in keys_pressed
 
 
 def clamp_int(v: float, lo: int = -100, hi: int = 100) -> int:
@@ -86,6 +101,8 @@ def stop_all(robot: SparkyBotMini):
 
 
 def main():
+    global listener_active, listener_error
+    
     parser = argparse.ArgumentParser(description="WASD controller for SparkyBotMini mecanum (X formation).")
     parser.add_argument("--port", "-p", default="/dev/ttyUSB0", help="Serial port (default: /dev/ttyUSB0)")
     parser.add_argument("--baud", "-b", type=int, default=115200, help="Baudrate (default: 115200)")
@@ -126,17 +143,40 @@ def main():
     print("\n=== WASD Controller Ready ===")
     print("Controls: W forward, S back, A strafe left, D strafe right, Q/E rotate, ESC to quit")
     print(f"Max speed: {MAX_SPEED}")
-    print("Press keys now...\n")
+    print("*** IMPORTANT: Keep the terminal window FOCUSED/ACTIVE for key detection! ***")
+    print("*** Key press debug messages will appear on stderr below. ***\n")
     
     # Start keyboard listener
-    listener = kb.Listener(on_press=on_press, on_release=on_release)
-    listener.start()
+    print("[DEBUG] Starting keyboard listener...")
+    try:
+        listener = kb.Listener(on_press=on_press, on_release=on_release)
+        listener.start()
+        listener_active = True
+        print("[DEBUG] Keyboard listener started successfully!")
+        time.sleep(0.5)
+    except Exception as e:
+        print(f"[ERROR] Failed to start keyboard listener: {e}")
+        print("[ERROR] This may happen on headless systems (SSH, no display).")
+        print("[ERROR] Consider running this script on a system with a display, or use a different input method.")
+        robot.disconnect()
+        sys.exit(1)
     
     last_m1, last_m2, last_m3, last_m4 = 0, 0, 0, 0
     command_count = 0
+    last_keys_printed = set()
     
     try:
         while True:
+            # Print listener status periodically
+            if listener_error:
+                print(f"[ERROR] Listener error detected: {listener_error}")
+                listener_error = None
+            
+            # Print current key state if changed
+            if keys_pressed != last_keys_printed:
+                print(f"[KEYS] Currently pressed: {keys_pressed if keys_pressed else '(none)'}", file=sys.stderr)
+                last_keys_printed = keys_pressed.copy()
+            
             # components
             f = 0.0    # forward (+ forward)
             s = 0.0    # strafe (+ right)
@@ -204,7 +244,8 @@ def main():
         stop_all(robot)
         time.sleep(0.05)
         robot.disconnect()
-        listener.stop()
+        if listener_active:
+            listener.stop()
         print("[DEBUG] Exited cleanly.")
 
 
