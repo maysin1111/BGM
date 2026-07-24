@@ -2,7 +2,7 @@
 """
 WASD controller for a 4-motor mecanum robot (X formation) using sparkybotmini.SparkyBotMini.
 
-run in terminal via: sudo python3 /home/pi/bgm.py/wasdContol.py
+run in terminal via: python3 /home/pi/bgm.py/wasdContol.py
 
 Motor mapping:
   motor 1 = front left
@@ -21,8 +21,7 @@ Controls:
 
 Requirements:
   - sparkybotmini.py must be on PYTHONPATH (this repo contains it).
-  - pip install keyboard pyserial
-  - On Linux, keyboard may require sudo.
+  - pip install pynput pyserial
 """
 
 import time
@@ -30,10 +29,9 @@ import sys
 import argparse
 
 try:
-    import keyboard
+    from pynput import keyboard as kb
 except Exception as e:
-    print("Missing dependency: the 'keyboard' module is required. Install with: pip install keyboard")
-    print("Note: on Linux 'keyboard' usually needs sudo privileges to capture global keys.")
+    print("Missing dependency: the 'pynput' module is required. Install with: pip install pynput")
     print("Error:", e)
     sys.exit(1)
 
@@ -44,6 +42,36 @@ except Exception as e:
     print("Failed to import SparkyBotMini from sparkybotmini.py. Ensure sparkybotmini.py is on PYTHONPATH.")
     print("Import error:", e)
     sys.exit(1)
+
+
+# Global state for key tracking
+keys_pressed = set()
+
+
+def on_press(key):
+    try:
+        keys_pressed.add(key.char.lower())
+    except AttributeError:
+        # Special keys (ESC, etc.)
+        if key == kb.Key.esc:
+            keys_pressed.add('esc')
+        elif key == kb.Key.shift:
+            keys_pressed.add('shift')
+
+
+def on_release(key):
+    try:
+        keys_pressed.discard(key.char.lower())
+    except AttributeError:
+        if key == kb.Key.esc:
+            keys_pressed.discard('esc')
+        elif key == kb.Key.shift:
+            keys_pressed.discard('shift')
+
+
+def is_pressed(key):
+    """Check if a key is currently pressed."""
+    return key in keys_pressed
 
 
 def clamp_int(v: float, lo: int = -100, hi: int = 100) -> int:
@@ -100,6 +128,10 @@ def main():
     print(f"Max speed: {MAX_SPEED}")
     print("Press keys now...\n")
     
+    # Start keyboard listener
+    listener = kb.Listener(on_press=on_press, on_release=on_release)
+    listener.start()
+    
     last_m1, last_m2, last_m3, last_m4 = 0, 0, 0, 0
     command_count = 0
     
@@ -110,21 +142,21 @@ def main():
             s = 0.0    # strafe (+ right)
             rot = 0.0  # rotation (+ clockwise)
 
-            if keyboard.is_pressed("w"):
+            if is_pressed("w"):
                 f += MAX_SPEED
-            if keyboard.is_pressed("s"):
+            if is_pressed("s"):
                 f -= MAX_SPEED
-            if keyboard.is_pressed("d"):
+            if is_pressed("d"):
                 s += MAX_SPEED
-            if keyboard.is_pressed("a"):
+            if is_pressed("a"):
                 s -= MAX_SPEED
-            if keyboard.is_pressed("e"):
+            if is_pressed("e"):
                 rot += MAX_SPEED * 0.6  # reduced rotation scale
-            if keyboard.is_pressed("q"):
+            if is_pressed("q"):
                 rot -= MAX_SPEED * 0.6
 
             # Exit on ESC
-            if keyboard.is_pressed("esc"):
+            if is_pressed("esc"):
                 print("\n[DEBUG] ESC pressed, exiting loop.")
                 break
 
@@ -172,6 +204,7 @@ def main():
         stop_all(robot)
         time.sleep(0.05)
         robot.disconnect()
+        listener.stop()
         print("[DEBUG] Exited cleanly.")
 
 
