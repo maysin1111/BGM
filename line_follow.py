@@ -308,9 +308,7 @@ def main():
                     cv2.LINE_AA,
                 )
 
-            # Show original color image, black/white threshold view, and debug overlay
-            cv2.imshow("Camera Color", frame)
-            cv2.imshow("Camera BW", bw)
+            # Show debug overlay only
             cv2.imshow("Line Follower Debug", debug)
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
