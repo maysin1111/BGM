@@ -73,19 +73,11 @@ class MotorDriver:
         m3 = float(np.clip(m3, MIN_SPEED_PERCENT, MAX_SPEED_PERCENT))
         m4 = float(np.clip(m4, MIN_SPEED_PERCENT, MAX_SPEED_PERCENT))
 
-        # ---- EDIT BELOW IF YOUR API IS DIFFERENT ----
-        # Option A (single call): self.bot.set_motors(m1, m2, m3, m4)
-        # Option B (per motor):
-        self.bot.set_motor("m1", m1)
-        self.bot.set_motor("m2", m2)
-        self.bot.set_motor("m3", m3)
-        self.bot.set_motor("m4", m4)
-        # ---------------------------------------------
+        # SparkyBotMini API expects one set_motor call with all four wheels.
+        self.bot.set_motor(m1, m2, m3, m4)
 
     def stop(self):
-        # ---- EDIT BELOW IF YOUR API IS DIFFERENT ----
         self.set_wheels_percent(0, 0, 0, 0)
-        # ---------------------------------------------
 
 
 class PID:
