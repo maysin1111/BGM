@@ -127,7 +127,7 @@ class PID:
 
 def find_line_error(frame):
     """
-    Returns normalized error in [-1, 1] and debug frame.
+    Returns normalized error in [-1, 1], debug frame, and BW mask.
     error < 0 => line is left of center
     error > 0 => line is right of center
     """
@@ -147,17 +147,21 @@ def find_line_error(frame):
     debug = frame.copy()
     cv2.rectangle(debug, (0, y0), (w, y1), (255, 0, 0), 2)
 
+    # Build full-frame BW view for display (ROI area contains thresholded mask)
+    bw_full = np.zeros((h, w), dtype=np.uint8)
+    bw_full[y0:y1, :] = mask
+
     if not contours:
-        return None, debug
+        return None, debug, bw_full
 
     largest = max(contours, key=cv2.contourArea)
     area = cv2.contourArea(largest)
     if area < MIN_CONTOUR_AREA:
-        return None, debug
+        return None, debug, bw_full
 
     M = cv2.moments(largest)
     if M["m00"] == 0:
-        return None, debug
+        return None, debug, bw_full
 
     cx_roi = int(M["m10"] / M["m00"])
     cy_roi = int(M["m01"] / M["m00"])
@@ -185,7 +189,7 @@ def find_line_error(frame):
         cv2.LINE_AA,
     )
 
-    return error_norm, debug
+    return error_norm, debug, bw_full
 
 
 def apply_steering(driver, base_speed, steer):
@@ -242,7 +246,7 @@ def main():
                 time.sleep(0.05)
                 continue
 
-            error, debug = find_line_error(frame)
+            error, debug, bw = find_line_error(frame)
 
             if error is None:
                 if time.time() - last_seen_time > LOST_LINE_TIMEOUT_S:
@@ -274,6 +278,9 @@ def main():
                     cv2.LINE_AA,
                 )
 
+            # Show original color image, black/white threshold view, and debug overlay
+            cv2.imshow("Camera Color", frame)
+            cv2.imshow("Camera BW", bw)
             cv2.imshow("Line Follower Debug", debug)
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
