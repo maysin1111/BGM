@@ -14,6 +14,7 @@ This script keeps motor I/O in one place (MotorDriver class). If your
 """
 
 import time
+import inspect
 import cv2
 import numpy as np
 
@@ -73,8 +74,37 @@ class MotorDriver:
         m3 = float(np.clip(m3, MIN_SPEED_PERCENT, MAX_SPEED_PERCENT))
         m4 = float(np.clip(m4, MIN_SPEED_PERCENT, MAX_SPEED_PERCENT))
 
-        # SparkyBotMini API expects one set_motor call with all four wheels.
-        self.bot.set_motor(m1, m2, m3, m4)
+        # Try likely SparkyBot API variants in order.
+        # 1) set_motor(m1, m2, m3, m4)
+        try:
+            self.bot.set_motor(m1, m2, m3, m4)
+            return
+        except TypeError:
+            pass
+
+        # 2) set_motors(m1, m2, m3, m4)
+        try:
+            self.bot.set_motors(m1, m2, m3, m4)
+            return
+        except (TypeError, AttributeError):
+            pass
+
+        # 3) set_motor("m1", m1, m2, m3, m4) (channel/mode first)
+        try:
+            self.bot.set_motor("m1", m1, m2, m3, m4)
+            return
+        except TypeError:
+            pass
+
+        # Final diagnostic: report discovered signature for quick correction.
+        sig = "unknown"
+        try:
+            sig = str(inspect.signature(self.bot.set_motor))
+        except Exception:
+            pass
+        raise RuntimeError(
+            f"Unsupported motor API for SparkyBotMini. set_motor signature: {sig}"
+        )
 
     def stop(self):
         self.set_wheels_percent(0, 0, 0, 0)
