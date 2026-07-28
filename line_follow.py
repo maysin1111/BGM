@@ -276,7 +276,7 @@ def main():
                 time.sleep(0.05)
                 continue
 
-            error, debug, bw = find_line_error(frame)
+            error, debug, _ = find_line_error(frame)
 
             if error is None:
                 if time.time() - last_seen_time > LOST_LINE_TIMEOUT_S:
