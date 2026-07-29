@@ -8,6 +8,7 @@ Patched for:
 3) optional chassis type set (X3)
 4) startup motor diagnostic test with readable logs
 5) quieter runtime motor logging
+6) improved line detection robustness (adaptive threshold + morphology + contour filtering + temporal consistency)
 """
 
 import time
@@ -24,11 +25,20 @@ FRAME_HEIGHT = 480
 FPS = 30
 
 # Vision
-ROI_Y_START_RATIO = 0.60
-ROI_Y_END_RATIO = 0.95
+ROI_Y_START_RATIO = 0.72
+ROI_Y_END_RATIO = 0.98
 BLUR_KERNEL = (5, 5)
 THRESH_BINARY_INV = 153
 MIN_CONTOUR_AREA = 500
+
+# Robust line segmentation
+USE_ADAPTIVE_THRESH = True
+ADAPTIVE_BLOCK_SIZE = 31   # odd number
+ADAPTIVE_C = 7
+MORPH_OPEN_KERNEL = (3, 3)
+MORPH_CLOSE_KERNEL = (7, 7)
+MIN_ASPECT_RATIO = 1.2     # reject non-line-like blobs
+MAX_JUMP_NORM = 0.35       # reject sudden centroid jumps
 
 # Control
 BASE_SPEED_PERCENT = 45.0
@@ -73,6 +83,9 @@ INVERT_M1 = False
 INVERT_M2 = False
 INVERT_M3 = False
 INVERT_M4 = False
+
+# Temporal state for line tracking
+_prev_cx = None
 
 
 class MotorDriver:
@@ -283,22 +296,38 @@ class PID:
 
 
 def find_line_error(frame):
+    global _prev_cx
+
     h, w = frame.shape[:2]
     y0 = int(h * ROI_Y_START_RATIO)
     y1 = int(h * ROI_Y_END_RATIO)
     roi = frame[y0:y1, :]
 
-    # Convert ROI to grayscale, blur, then hard-threshold to pure black/white
+    # Convert ROI to grayscale, blur
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(gray, BLUR_KERNEL, 0)
-    _, mask = cv2.threshold(blur, THRESH_BINARY_INV, 255, cv2.THRESH_BINARY)
 
-    # Find contours on the binary mask
+    # Robust thresholding for variable lighting
+    if USE_ADAPTIVE_THRESH:
+        mask = cv2.adaptiveThreshold(
+            blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY_INV, ADAPTIVE_BLOCK_SIZE, ADAPTIVE_C
+        )
+    else:
+        _, mask = cv2.threshold(blur, THRESH_BINARY_INV, 255, cv2.THRESH_BINARY_INV)
+
+    # Morphological cleanup: remove speckles then fill gaps
+    k_open = cv2.getStructuringElement(cv2.MORPH_RECT, MORPH_OPEN_KERNEL)
+    k_close = cv2.getStructuringElement(cv2.MORPH_RECT, MORPH_CLOSE_KERNEL)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k_open, iterations=1)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k_close, iterations=1)
+
+    # Find contours on cleaned mask
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     # Build a black/white debug frame (3-channel so we can draw overlays)
     full_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    _, full_bw = cv2.threshold(full_gray, THRESH_BINARY_INV, 255, cv2.THRESH_BINARY)
+    _, full_bw = cv2.threshold(full_gray, THRESH_BINARY_INV, 255, cv2.THRESH_BINARY_INV)
     debug = cv2.cvtColor(full_bw, cv2.COLOR_GRAY2BGR)
     cv2.rectangle(debug, (0, y0), (w, y1), (255, 255, 255), 2)
 
@@ -310,25 +339,52 @@ def find_line_error(frame):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
         return None, debug, bw_full
 
-    largest = max(contours, key=cv2.contourArea)
-    area = cv2.contourArea(largest)
-    cv2.putText(debug, f"area={area:.0f}", (10, 125),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+    # Score contours: area + elongation, with temporal preference near previous cx
+    candidates = []
+    for c in contours:
+        area = cv2.contourArea(c)
+        if area < MIN_CONTOUR_AREA:
+            continue
 
-    if area < MIN_CONTOUR_AREA:
-        cv2.putText(debug, "contour too small", (10, 155),
+        x, y, cw, ch = cv2.boundingRect(c)
+        aspect = (cw / max(ch, 1))  # horizontal elongation
+        if aspect < MIN_ASPECT_RATIO:
+            continue
+
+        M = cv2.moments(c)
+        if M["m00"] == 0:
+            continue
+        cx = int(M["m10"] / M["m00"])
+
+        score = area + (aspect * 100.0)
+        if _prev_cx is not None:
+            score -= abs(cx - _prev_cx) * 2.0  # prefer continuity
+
+        candidates.append((score, c, area, cx))
+
+    if not candidates:
+        cv2.putText(debug, "no valid contour", (10, 125),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
         return None, debug, bw_full
 
-    M = cv2.moments(largest)
-    if M["m00"] == 0:
+    _, largest, area, cx = max(candidates, key=lambda t: t[0])
+
+    # Hard reject sudden jumps (often false positives)
+    if _prev_cx is not None and abs(cx - _prev_cx) / (w / 2.0) > MAX_JUMP_NORM:
+        cv2.putText(debug, "jump rejected", (10, 155),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
         return None, debug, bw_full
 
-    cx = int(M["m10"] / M["m00"])
+    _prev_cx = cx
+
+    M = cv2.moments(largest)
     cy = int(M["m01"] / M["m00"]) + y0
     image_center_x = w // 2
 
     error_norm = float(np.clip((cx - image_center_x) / (w / 2.0), -1.0, 1.0))
+
+    cv2.putText(debug, f"area={area:.0f}", (10, 125),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
 
     # Draw in white so the whole display stays black/white
     cv2.drawContours(debug[y0:y1, :], [largest], -1, (255, 255, 255), 2)
@@ -360,6 +416,7 @@ def apply_steering(driver, base_speed, steer):
 
 
 def main():
+    global _prev_cx
     driver = MotorDriver()
     pid = PID(KP, KI, KD, integral_limit=INTEGRAL_LIMIT)
 
@@ -378,6 +435,9 @@ def main():
 
         if not cap.isOpened():
             raise RuntimeError("Could not open camera")
+
+        # reset temporal line tracking each run
+        _prev_cx = None
 
         last_seen_time = time.time()
         print("Starting line follower. Press 'q' in display window or Ctrl+C to quit.")
