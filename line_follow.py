@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 Line follower for SparkyBot Mini (Mecanum drive) using front camera and PID steering.
+Patched with startup motor diagnostics + wheel invert/remap.
 """
 
 import time
-import inspect
 import cv2
 import numpy as np
 import sparkybotmini
@@ -25,12 +25,12 @@ THRESH_BINARY_INV = 70
 MIN_CONTOUR_AREA = 500
 
 # Control
-BASE_SPEED_PERCENT = 50.0
+BASE_SPEED_PERCENT = 45.0
 MAX_SPEED_PERCENT = 90.0
-MIN_SPEED_PERCENT = -90.0   # FIX: allow reverse values
-STEER_DEADBAND = 0.05       # FIX: small deadband to reduce jitter
+MIN_SPEED_PERCENT = -90.0
+STEER_DEADBAND = 0.05
 
-# PID - FIX: Tuned for stability (reduced KP, increased KD for damping)
+# PID
 KP = 0.20
 KI = 0.00
 KD = 0.25
@@ -39,14 +39,28 @@ INTEGRAL_LIMIT = 2000.0
 LOST_LINE_TIMEOUT_S = 0.6
 LOOP_DELAY_S = 0.01
 
+# ---------------------------
+# Motor mapping / polarity patch
+# ---------------------------
+# Command order expected by robot.set_motor is (m1, m2, m3, m4).
+# If robot doesn't move as expected, change MOTOR_MAP and/or INVERT_M*.
+MOTOR_MAP = (0, 1, 2, 3)  # identity map
+INVERT_M1 = False
+INVERT_M2 = False
+INVERT_M3 = False
+INVERT_M4 = False
+
+# Startup diagnostics
+ENABLE_STARTUP_MOTOR_TEST = True
+STARTUP_TEST_SPEED = 35
+STARTUP_TEST_DURATION = 0.7
+
 
 class MotorDriver:
     def __init__(self):
-        # v6 fix: use detected serial port
-        self.bot = sparkybotmini.SparkyBotMini(port="/dev/ttyAMA10")
+        self.bot = sparkybotmini.SparkyBotMini(port="/dev/ttyAMA10", debug=False)
         self.comm_failed = False
 
-        # Open serial port
         if not self.bot.connect():
             self.comm_failed = True
             raise RuntimeError(
@@ -54,47 +68,40 @@ class MotorDriver:
                 "Check USB/port/power."
             )
 
-        # Optional: start auto-reporting
+        # Enable reports so we can read encoders/voltage for debugging.
         self.bot.set_auto_report(True)
+        time.sleep(0.1)
+
+        ver = self.bot.get_version(timeout=0.1)
+        batt = self.bot.get_battery_voltage()
+        print(f"[INIT] Connected on {self.bot.port} | fw={ver} | batt={batt:.2f}V")
 
     def _is_connected(self):
         return (self.bot.ser is not None) and bool(getattr(self.bot.ser, "is_open", False))
 
-    def _send_once(self, m1, m2, m3, m4):
-        # sparkybotmini expects integer motor values (-100..100)
-        m1 = int(round(m1))
-        m2 = int(round(m2))
-        m3 = int(round(m3))
-        m4 = int(round(m4))
+    @staticmethod
+    def _clamp(v):
+        return int(np.clip(int(round(v)), -100, 100))
 
-        # Try likely APIs
-        try:
-            self.bot.set_motor(m1, m2, m3, m4)
-            return
-        except TypeError:
-            pass
+    def _apply_map_and_invert(self, m1, m2, m3, m4):
+        vals = [m1, m2, m3, m4]
 
-        try:
-            self.bot.set_motors(m1, m2, m3, m4)
-            return
-        except (TypeError, AttributeError):
-            pass
+        # map logical wheels -> physical channels
+        vals = [vals[MOTOR_MAP[0]], vals[MOTOR_MAP[1]], vals[MOTOR_MAP[2]], vals[MOTOR_MAP[3]]]
 
-        try:
-            self.bot.set_motor("m1", m1, m2, m3, m4)
-            return
-        except TypeError:
-            pass
+        # per-channel inversion
+        if INVERT_M1:
+            vals[0] = -vals[0]
+        if INVERT_M2:
+            vals[1] = -vals[1]
+        if INVERT_M3:
+            vals[2] = -vals[2]
+        if INVERT_M4:
+            vals[3] = -vals[3]
 
-        sig = "unknown"
-        try:
-            sig = str(inspect.signature(self.bot.set_motor))
-        except Exception:
-            pass
-        raise RuntimeError(f"Unsupported motor API for SparkyBotMini. set_motor signature: {sig}")
+        return vals
 
     def set_wheels_percent(self, m1, m2, m3, m4):
-        # FIX: clamp to signed range so reverse is possible
         m1 = float(np.clip(m1, MIN_SPEED_PERCENT, MAX_SPEED_PERCENT))
         m2 = float(np.clip(m2, MIN_SPEED_PERCENT, MAX_SPEED_PERCENT))
         m3 = float(np.clip(m3, MIN_SPEED_PERCENT, MAX_SPEED_PERCENT))
@@ -102,16 +109,18 @@ class MotorDriver:
 
         if self.comm_failed:
             raise RuntimeError("Motor communication is in failed state.")
-
         if not self._is_connected():
             self.comm_failed = True
             raise RuntimeError("Serial not connected (ser is None or closed).")
 
-        # FIX: debug print to verify actual motor commands
-        print(f"motor cmd -> m1:{m1:+.1f} m2:{m2:+.1f} m3:{m3:+.1f} m4:{m4:+.1f}")
+        c1, c2, c3, c4 = self._apply_map_and_invert(
+            self._clamp(m1), self._clamp(m2), self._clamp(m3), self._clamp(m4)
+        )
+
+        print(f"[MOTOR] cmd raw=({m1:+.1f},{m2:+.1f},{m3:+.1f},{m4:+.1f}) -> sent=({c1:+d},{c2:+d},{c3:+d},{c4:+d})")
 
         try:
-            self._send_once(m1, m2, m3, m4)
+            self.bot.set_motor(c1, c2, c3, c4)
         except Exception as e:
             self.comm_failed = True
             raise RuntimeError(f"Motor send failed: {e}") from e
@@ -123,6 +132,34 @@ class MotorDriver:
             self.set_wheels_percent(0, 0, 0, 0)
         except Exception:
             self.comm_failed = True
+
+    def startup_test(self):
+        """
+        Quick test to confirm motors physically respond.
+        """
+        print("[TEST] Running startup motor test...")
+
+        sequences = [
+            ("forward",  STARTUP_TEST_SPEED,  STARTUP_TEST_SPEED,  STARTUP_TEST_SPEED,  STARTUP_TEST_SPEED),
+            ("backward", -STARTUP_TEST_SPEED, -STARTUP_TEST_SPEED, -STARTUP_TEST_SPEED, -STARTUP_TEST_SPEED),
+            ("turn_right", STARTUP_TEST_SPEED, STARTUP_TEST_SPEED, -STARTUP_TEST_SPEED, -STARTUP_TEST_SPEED),
+            ("turn_left", -STARTUP_TEST_SPEED, -STARTUP_TEST_SPEED, STARTUP_TEST_SPEED, STARTUP_TEST_SPEED),
+        ]
+
+        for name, a, b, c, d in sequences:
+            print(f"[TEST] {name}")
+            self.set_wheels_percent(a, b, c, d)
+            time.sleep(STARTUP_TEST_DURATION)
+            self.set_wheels_percent(0, 0, 0, 0)
+            time.sleep(0.25)
+
+            try:
+                enc = self.bot.get_encoders()
+                print(f"[TEST] encoders after {name}: {enc}")
+            except Exception as e:
+                print(f"[TEST] encoder read failed: {e}")
+
+        print("[TEST] Startup motor test done.")
 
     def close(self):
         try:
@@ -162,11 +199,6 @@ class PID:
 
 
 def find_line_error(frame):
-    """
-    Returns normalized error in [-1, 1], debug frame, and BW mask.
-    error < 0 => line is left of center
-    error > 0 => line is right of center
-    """
     h, w = frame.shape[:2]
 
     y0 = int(h * ROI_Y_START_RATIO)
@@ -222,15 +254,9 @@ def find_line_error(frame):
 
 
 def apply_steering(driver, base_speed, steer):
-    """
-    steer > 0 means line is right -> robot should turn right
-    steer < 0 means line is left -> robot should turn left
-    """
-    # FIX: deadband for small steering noise
     if abs(steer) < STEER_DEADBAND:
         steer = 0.0
 
-    # FIX: Reduced steering delta for smoother control
     delta = abs(steer) * 35.0
 
     if steer > 0:
@@ -242,13 +268,16 @@ def apply_steering(driver, base_speed, steer):
     else:
         left = right = base_speed
 
-    # FL, BL, FR, BR
+    # logical order: FL, BL, FR, BR
     driver.set_wheels_percent(left, left, right, right)
 
 
 def main():
     driver = MotorDriver()
     pid = PID(KP, KI, KD, integral_limit=INTEGRAL_LIMIT)
+
+    if ENABLE_STARTUP_MOTOR_TEST:
+        driver.startup_test()
 
     cap = cv2.VideoCapture(CAMERA_INDEX)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
@@ -259,7 +288,6 @@ def main():
         raise RuntimeError("Could not open camera")
 
     last_seen_time = time.time()
-
     print("Starting line follower. Press 'q' in display window or Ctrl+C to quit.")
 
     try:
@@ -267,10 +295,7 @@ def main():
             ok, frame = cap.read()
             if not ok:
                 print("Camera read failed")
-                try:
-                    driver.stop()
-                except Exception:
-                    pass
+                driver.stop()
                 time.sleep(0.05)
                 continue
 
@@ -281,8 +306,7 @@ def main():
                     try:
                         driver.stop()
                     except Exception as e:
-                        print(f"Motor communication failed while stopping: {e}")
-                        # FIX: try to recover next loop instead of permanently disabling
+                        print(f"Motor stop failed: {e}")
                         driver.comm_failed = False
 
                 cv2.putText(
@@ -297,8 +321,7 @@ def main():
                     apply_steering(driver, BASE_SPEED_PERCENT, steer)
                 except Exception as e:
                     print(f"Motor communication failed: {e}")
-                    print("Will retry motor command next loop...")
-                    # FIX: don't permanently disable motion on one transient error
+                    print("Will retry next loop...")
                     driver.comm_failed = False
 
                 cv2.putText(
