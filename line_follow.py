@@ -8,7 +8,7 @@ Patched for:
 3) optional chassis type set (X3)
 4) startup motor diagnostic test with readable logs
 5) quieter runtime motor logging
-6) improved line detection robustness (adaptive threshold + morphology + contour filtering + temporal consistency)
+6) improved line detection robustness with lenient recovery settings
 """
 
 import time
@@ -25,20 +25,20 @@ FRAME_HEIGHT = 480
 FPS = 30
 
 # Vision
-ROI_Y_START_RATIO = 0.72
+ROI_Y_START_RATIO = 0.62
 ROI_Y_END_RATIO = 0.98
 BLUR_KERNEL = (5, 5)
 THRESH_BINARY_INV = 153
-MIN_CONTOUR_AREA = 500
+MIN_CONTOUR_AREA = 180  # lowered from 500 for easier detection
 
-# Robust line segmentation
-USE_ADAPTIVE_THRESH = True
-ADAPTIVE_BLOCK_SIZE = 31   # odd number
-ADAPTIVE_C = 7
-MORPH_OPEN_KERNEL = (3, 3)
-MORPH_CLOSE_KERNEL = (7, 7)
-MIN_ASPECT_RATIO = 1.2     # reject non-line-like blobs
-MAX_JUMP_NORM = 0.35       # reject sudden centroid jumps
+# Robust line segmentation (lenient recovery mode)
+USE_ADAPTIVE_THRESH = False  # OFF for now; use Otsu fallback
+ADAPTIVE_BLOCK_SIZE = 31     # used only if USE_ADAPTIVE_THRESH=True
+ADAPTIVE_C = 7               # used only if USE_ADAPTIVE_THRESH=True
+MORPH_OPEN_KERNEL = (2, 2)   # gentler cleanup
+MORPH_CLOSE_KERNEL = (5, 5)
+MIN_ASPECT_RATIO = 0.6       # was stricter; now allows more shapes
+MAX_JUMP_NORM = 1.0          # effectively disables jump rejection
 
 # Control
 BASE_SPEED_PERCENT = 45.0
@@ -61,8 +61,9 @@ LOOP_DELAY_S = 0.01
 RUN_LINE_FOLLOWER = True
 ENABLE_STARTUP_MOTOR_TEST = False
 
-VERBOSE_MOTOR_STREAM = False  # False = less spam
-VERBOSE_PORT_PROBE = True     # True = show probe results
+VERBOSE_MOTOR_STREAM = False   # False = less spam
+VERBOSE_PORT_PROBE = True      # True = show probe results
+VERBOSE_MASK_STATS = True      # True = print white-pixel ratio in ROI mask
 
 STARTUP_TEST_SPEED = 70
 STARTUP_TEST_DURATION = 1.2
@@ -314,13 +315,22 @@ def find_line_error(frame):
             cv2.THRESH_BINARY_INV, ADAPTIVE_BLOCK_SIZE, ADAPTIVE_C
         )
     else:
-        _, mask = cv2.threshold(blur, THRESH_BINARY_INV, 255, cv2.THRESH_BINARY_INV)
+        # Otsu auto-threshold baseline (often best first step for black tape lines)
+        _, mask = cv2.threshold(
+            blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+        )
 
     # Morphological cleanup: remove speckles then fill gaps
     k_open = cv2.getStructuringElement(cv2.MORPH_RECT, MORPH_OPEN_KERNEL)
     k_close = cv2.getStructuringElement(cv2.MORPH_RECT, MORPH_CLOSE_KERNEL)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k_open, iterations=1)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k_close, iterations=1)
+
+    # Debug mask occupancy
+    if VERBOSE_MASK_STATS:
+        white_px = int(np.count_nonzero(mask))
+        total_px = mask.size
+        print(f"[MASK] white={white_px} ({100.0 * white_px / total_px:.1f}%)")
 
     # Find contours on cleaned mask
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -347,7 +357,7 @@ def find_line_error(frame):
             continue
 
         x, y, cw, ch = cv2.boundingRect(c)
-        aspect = (cw / max(ch, 1))  # horizontal elongation
+        aspect = (cw / max(ch, 1))
         if aspect < MIN_ASPECT_RATIO:
             continue
 
@@ -369,7 +379,7 @@ def find_line_error(frame):
 
     _, largest, area, cx = max(candidates, key=lambda t: t[0])
 
-    # Hard reject sudden jumps (often false positives)
+    # Jump rejection (effectively disabled at MAX_JUMP_NORM=1.0)
     if _prev_cx is not None and abs(cx - _prev_cx) / (w / 2.0) > MAX_JUMP_NORM:
         cv2.putText(debug, "jump rejected", (10, 155),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
