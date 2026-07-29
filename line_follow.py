@@ -25,11 +25,11 @@ FRAME_HEIGHT = 480
 FPS = 30
 
 # Vision
-ROI_Y_START_RATIO = 0.76
-ROI_Y_END_RATIO = 0.98
+ROI_Y_START_RATIO = 0.80
+ROI_Y_END_RATIO = 0.96
 BLUR_KERNEL = (5, 5)
 THRESH_BINARY_INV = 153
-MIN_CONTOUR_AREA = 500
+MIN_CONTOUR_AREA = 150  # patched: lowered for easier detection during bring-up
 
 # Robust line segmentation
 USE_ADAPTIVE_THRESH = True
@@ -37,7 +37,7 @@ ADAPTIVE_BLOCK_SIZE = 31   # odd number
 ADAPTIVE_C = 7
 MORPH_OPEN_KERNEL = (3, 3)
 MORPH_CLOSE_KERNEL = (7, 7)
-MIN_ASPECT_RATIO = 1.2     # reject non-line-like blobs
+MIN_ASPECT_RATIO = 0.8     # patched: relaxed shape filter
 MAX_JUMP_NORM = 0.35       # reject sudden centroid jumps
 
 # Control
@@ -311,16 +311,19 @@ def find_line_error(frame):
     if USE_ADAPTIVE_THRESH:
         mask = cv2.adaptiveThreshold(
             blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY_INV, ADAPTIVE_BLOCK_SIZE, ADAPTIVE_C
+            cv2.THRESH_BINARY, ADAPTIVE_BLOCK_SIZE, ADAPTIVE_C   # patched: INV -> BINARY
         )
     else:
-        _, mask = cv2.threshold(blur, THRESH_BINARY_INV, 255, cv2.THRESH_BINARY_INV)
+        _, mask = cv2.threshold(blur, THRESH_BINARY_INV, 255, cv2.THRESH_BINARY)  # patched: INV -> BINARY
 
     # Morphological cleanup: remove speckles then fill gaps
     k_open = cv2.getStructuringElement(cv2.MORPH_RECT, MORPH_OPEN_KERNEL)
     k_close = cv2.getStructuringElement(cv2.MORPH_RECT, MORPH_CLOSE_KERNEL)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k_open, iterations=1)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k_close, iterations=1)
+
+    # Optional quick debug to verify threshold fill:
+    # print("mask_nonzero=", int(np.count_nonzero(mask)))
 
     # Find contours on cleaned mask
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
