@@ -30,10 +30,10 @@ MAX_SPEED_PERCENT = 90.0
 MIN_SPEED_PERCENT = -90.0   # FIX: allow reverse values
 STEER_DEADBAND = 0.05       # FIX: small deadband to reduce jitter
 
-# PID
-KP = 0.35
+# PID - FIX: Tuned for stability (reduced KP, increased KD for damping)
+KP = 0.20
 KI = 0.00
-KD = 0.18
+KD = 0.25
 
 INTEGRAL_LIMIT = 2000.0
 LOST_LINE_TIMEOUT_S = 0.6
@@ -230,7 +230,8 @@ def apply_steering(driver, base_speed, steer):
     if abs(steer) < STEER_DEADBAND:
         steer = 0.0
 
-    delta = abs(steer) * 50.0
+    # FIX: Reduced steering delta for smoother control
+    delta = abs(steer) * 35.0
 
     if steer > 0:
         left = base_speed + delta
