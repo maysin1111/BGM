@@ -27,7 +27,8 @@ MIN_CONTOUR_AREA = 500
 # Control
 BASE_SPEED_PERCENT = 50.0
 MAX_SPEED_PERCENT = 90.0
-MIN_SPEED_PERCENT = 0.0
+MIN_SPEED_PERCENT = -90.0   # FIX: allow reverse values
+STEER_DEADBAND = 0.05       # FIX: small deadband to reduce jitter
 
 # PID
 KP = 0.35
@@ -93,6 +94,7 @@ class MotorDriver:
         raise RuntimeError(f"Unsupported motor API for SparkyBotMini. set_motor signature: {sig}")
 
     def set_wheels_percent(self, m1, m2, m3, m4):
+        # FIX: clamp to signed range so reverse is possible
         m1 = float(np.clip(m1, MIN_SPEED_PERCENT, MAX_SPEED_PERCENT))
         m2 = float(np.clip(m2, MIN_SPEED_PERCENT, MAX_SPEED_PERCENT))
         m3 = float(np.clip(m3, MIN_SPEED_PERCENT, MAX_SPEED_PERCENT))
@@ -104,6 +106,9 @@ class MotorDriver:
         if not self._is_connected():
             self.comm_failed = True
             raise RuntimeError("Serial not connected (ser is None or closed).")
+
+        # FIX: debug print to verify actual motor commands
+        print(f"motor cmd -> m1:{m1:+.1f} m2:{m2:+.1f} m3:{m3:+.1f} m4:{m4:+.1f}")
 
         try:
             self._send_once(m1, m2, m3, m4)
@@ -181,10 +186,18 @@ def find_line_error(frame):
     bw_full[y0:y1, :] = mask
 
     if not contours:
+        cv2.putText(debug, "no contours", (10, 125),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 120, 255), 2, cv2.LINE_AA)
         return None, debug, bw_full
 
     largest = max(contours, key=cv2.contourArea)
-    if cv2.contourArea(largest) < MIN_CONTOUR_AREA:
+    area = cv2.contourArea(largest)
+    cv2.putText(debug, f"area={area:.0f}", (10, 125),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+
+    if area < MIN_CONTOUR_AREA:
+        cv2.putText(debug, "contour too small", (10, 155),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 120, 255), 2, cv2.LINE_AA)
         return None, debug, bw_full
 
     M = cv2.moments(largest)
@@ -213,6 +226,10 @@ def apply_steering(driver, base_speed, steer):
     steer > 0 means line is right -> robot should turn right
     steer < 0 means line is left -> robot should turn left
     """
+    # FIX: deadband for small steering noise
+    if abs(steer) < STEER_DEADBAND:
+        steer = 0.0
+
     delta = abs(steer) * 50.0
 
     if steer > 0:
@@ -241,7 +258,6 @@ def main():
         raise RuntimeError("Could not open camera")
 
     last_seen_time = time.time()
-    motor_dead = False
 
     print("Starting line follower. Press 'q' in display window or Ctrl+C to quit.")
 
@@ -250,23 +266,23 @@ def main():
             ok, frame = cap.read()
             if not ok:
                 print("Camera read failed")
-                if not motor_dead:
-                    try:
-                        driver.stop()
-                    except Exception:
-                        motor_dead = True
+                try:
+                    driver.stop()
+                except Exception:
+                    pass
                 time.sleep(0.05)
                 continue
 
             error, debug, _ = find_line_error(frame)
 
             if error is None:
-                if time.time() - last_seen_time > LOST_LINE_TIMEOUT_S and not motor_dead:
+                if time.time() - last_seen_time > LOST_LINE_TIMEOUT_S:
                     try:
                         driver.stop()
                     except Exception as e:
                         print(f"Motor communication failed while stopping: {e}")
-                        motor_dead = True
+                        # FIX: try to recover next loop instead of permanently disabling
+                        driver.comm_failed = False
 
                 cv2.putText(
                     debug, "LINE LOST", (10, 65),
@@ -276,13 +292,13 @@ def main():
                 last_seen_time = time.time()
                 steer = float(np.clip(pid.update(error), -1.0, 1.0))
 
-                if not motor_dead:
-                    try:
-                        apply_steering(driver, BASE_SPEED_PERCENT, steer)
-                    except Exception as e:
-                        print(f"Motor communication failed: {e}")
-                        print("Disabling motor commands for this run.")
-                        motor_dead = True
+                try:
+                    apply_steering(driver, BASE_SPEED_PERCENT, steer)
+                except Exception as e:
+                    print(f"Motor communication failed: {e}")
+                    print("Will retry motor command next loop...")
+                    # FIX: don't permanently disable motion on one transient error
+                    driver.comm_failed = False
 
                 cv2.putText(
                     debug, f"steer={steer:+.3f}", (10, 95),
@@ -298,11 +314,10 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        if not motor_dead:
-            try:
-                driver.stop()
-            except Exception:
-                pass
+        try:
+            driver.stop()
+        except Exception:
+            pass
         driver.close()
         cap.release()
         cv2.destroyAllWindows()
