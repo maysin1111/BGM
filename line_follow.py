@@ -27,7 +27,7 @@ FPS = 30
 ROI_Y_START_RATIO = 0.60
 ROI_Y_END_RATIO = 0.95
 BLUR_KERNEL = (5, 5)
-THRESH_BINARY_INV = 70
+THRESH_BINARY_INV = 127
 MIN_CONTOUR_AREA = 500
 
 # Control
@@ -288,21 +288,26 @@ def find_line_error(frame):
     y1 = int(h * ROI_Y_END_RATIO)
     roi = frame[y0:y1, :]
 
+    # Convert ROI to grayscale, blur, then hard-threshold to pure black/white
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(gray, BLUR_KERNEL, 0)
+    _, mask = cv2.threshold(blur, THRESH_BINARY_INV, 255, cv2.THRESH_BINARY)
 
-    _, mask = cv2.threshold(blur, THRESH_BINARY_INV, 255, cv2.THRESH_BINARY_INV)
+    # Find contours on the binary mask
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    debug = frame.copy()
-    cv2.rectangle(debug, (0, y0), (w, y1), (255, 0, 0), 2)
+    # Build a black/white debug frame (3-channel so we can draw overlays)
+    full_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    _, full_bw = cv2.threshold(full_gray, THRESH_BINARY_INV, 255, cv2.THRESH_BINARY)
+    debug = cv2.cvtColor(full_bw, cv2.COLOR_GRAY2BGR)
+    cv2.rectangle(debug, (0, y0), (w, y1), (255, 255, 255), 2)
 
     bw_full = np.zeros((h, w), dtype=np.uint8)
     bw_full[y0:y1, :] = mask
 
     if not contours:
         cv2.putText(debug, "no contours", (10, 125),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 120, 255), 2, cv2.LINE_AA)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
         return None, debug, bw_full
 
     largest = max(contours, key=cv2.contourArea)
@@ -312,7 +317,7 @@ def find_line_error(frame):
 
     if area < MIN_CONTOUR_AREA:
         cv2.putText(debug, "contour too small", (10, 155),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 120, 255), 2, cv2.LINE_AA)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
         return None, debug, bw_full
 
     M = cv2.moments(largest)
@@ -325,11 +330,12 @@ def find_line_error(frame):
 
     error_norm = float(np.clip((cx - image_center_x) / (w / 2.0), -1.0, 1.0))
 
-    cv2.drawContours(debug[y0:y1, :], [largest], -1, (0, 255, 0), 2)
-    cv2.circle(debug, (cx, cy), 6, (0, 0, 255), -1)
-    cv2.line(debug, (image_center_x, y0), (image_center_x, y1), (255, 255, 0), 2)
+    # Draw in white so the whole display stays black/white
+    cv2.drawContours(debug[y0:y1, :], [largest], -1, (255, 255, 255), 2)
+    cv2.circle(debug, (cx, cy), 6, (255, 255, 255), -1)
+    cv2.line(debug, (image_center_x, y0), (image_center_x, y1), (255, 255, 255), 2)
     cv2.putText(debug, f"err={error_norm:+.3f}", (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2, cv2.LINE_AA)
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
 
     return error_norm, debug, bw_full
 
@@ -391,7 +397,7 @@ def main():
                     driver.stop()
 
                 cv2.putText(debug, "LINE LOST", (10, 65),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2, cv2.LINE_AA)
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
             else:
                 last_seen_time = time.time()
                 steer = float(np.clip(pid.update(error), -1.0, 1.0))
