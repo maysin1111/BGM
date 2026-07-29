@@ -49,7 +49,7 @@ LOOP_DELAY_S = 0.01
 # Runtime / Debug controls
 # ---------------------------
 RUN_LINE_FOLLOWER = True
-ENABLE_STARTUP_MOTOR_TEST = True
+ENABLE_STARTUP_MOTOR_TEST = False
 
 VERBOSE_MOTOR_STREAM = False  # False = less spam
 VERBOSE_PORT_PROBE = True     # True = show probe results
