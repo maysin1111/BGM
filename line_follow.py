@@ -41,10 +41,11 @@ LOOP_DELAY_S = 0.01
 
 class MotorDriver:
     def __init__(self):
-        self.bot = sparkybotmini.SparkyBotMini()
+        # v6 fix: use detected serial port
+        self.bot = sparkybotmini.SparkyBotMini(port="/dev/ttyAMA10")
         self.comm_failed = False
 
-        # CRITICAL FIX: open serial port
+        # Open serial port
         if not self.bot.connect():
             self.comm_failed = True
             raise RuntimeError(
@@ -52,34 +53,32 @@ class MotorDriver:
                 "Check USB/port/power."
             )
 
-        # Optional but useful
+        # Optional: start auto-reporting
         self.bot.set_auto_report(True)
 
     def _is_connected(self):
         return (self.bot.ser is not None) and bool(getattr(self.bot.ser, "is_open", False))
 
     def _send_once(self, m1, m2, m3, m4):
-        # Your library expects integer motor values (-100..100)
+        # sparkybotmini expects integer motor values (-100..100)
         m1 = int(round(m1))
         m2 = int(round(m2))
         m3 = int(round(m3))
         m4 = int(round(m4))
 
-        # 1) set_motor(m1, m2, m3, m4)
+        # Try likely APIs
         try:
             self.bot.set_motor(m1, m2, m3, m4)
             return
         except TypeError:
             pass
 
-        # 2) set_motors(m1, m2, m3, m4)
         try:
             self.bot.set_motors(m1, m2, m3, m4)
             return
         except (TypeError, AttributeError):
             pass
 
-        # 3) set_motor("m1", m1, m2, m3, m4)
         try:
             self.bot.set_motor("m1", m1, m2, m3, m4)
             return
@@ -142,6 +141,7 @@ class PID:
         dt = 0.0 if self.prev_time is None else (now - self.prev_time)
 
         p = self.kp * error
+
         if dt > 0.0:
             self.integral += error * dt
             if self.integral_limit is not None:
@@ -157,13 +157,20 @@ class PID:
 
 
 def find_line_error(frame):
+    """
+    Returns normalized error in [-1, 1], debug frame, and BW mask.
+    error < 0 => line is left of center
+    error > 0 => line is right of center
+    """
     h, w = frame.shape[:2]
+
     y0 = int(h * ROI_Y_START_RATIO)
     y1 = int(h * ROI_Y_END_RATIO)
     roi = frame[y0:y1, :]
 
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(gray, BLUR_KERNEL, 0)
+
     _, mask = cv2.threshold(blur, THRESH_BINARY_INV, 255, cv2.THRESH_BINARY_INV)
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
@@ -193,14 +200,21 @@ def find_line_error(frame):
     cv2.drawContours(debug[y0:y1, :], [largest], -1, (0, 255, 0), 2)
     cv2.circle(debug, (cx, cy), 6, (0, 0, 255), -1)
     cv2.line(debug, (image_center_x, y0), (image_center_x, y1), (255, 255, 0), 2)
-    cv2.putText(debug, f"err={error_norm:+.3f}", (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2, cv2.LINE_AA)
+    cv2.putText(
+        debug, f"err={error_norm:+.3f}", (10, 30),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2, cv2.LINE_AA
+    )
 
     return error_norm, debug, bw_full
 
 
 def apply_steering(driver, base_speed, steer):
+    """
+    steer > 0 means line is right -> robot should turn right
+    steer < 0 means line is left -> robot should turn left
+    """
     delta = abs(steer) * 50.0
+
     if steer > 0:
         left = base_speed + delta
         right = base_speed - delta * 0.5
@@ -210,6 +224,7 @@ def apply_steering(driver, base_speed, steer):
     else:
         left = right = base_speed
 
+    # FL, BL, FR, BR
     driver.set_wheels_percent(left, left, right, right)
 
 
@@ -252,8 +267,11 @@ def main():
                     except Exception as e:
                         print(f"Motor communication failed while stopping: {e}")
                         motor_dead = True
-                cv2.putText(debug, "LINE LOST", (10, 65),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2, cv2.LINE_AA)
+
+                cv2.putText(
+                    debug, "LINE LOST", (10, 65),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2, cv2.LINE_AA
+                )
             else:
                 last_seen_time = time.time()
                 steer = float(np.clip(pid.update(error), -1.0, 1.0))
@@ -266,8 +284,10 @@ def main():
                         print("Disabling motor commands for this run.")
                         motor_dead = True
 
-                cv2.putText(debug, f"steer={steer:+.3f}", (10, 95),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
+                cv2.putText(
+                    debug, f"steer={steer:+.3f}", (10, 95),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA
+                )
 
             cv2.imshow("Line Follower Debug", debug)
             if cv2.waitKey(1) & 0xFF == ord("q"):
