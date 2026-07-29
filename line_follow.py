@@ -60,9 +60,15 @@ class MotorDriver:
     """
 
     def __init__(self):
-        # Common pattern: instantiate robot/board object
-        # Adjust if your library differs.
         self.bot = sparkybotmini.SparkyBotMini()
+        self._last_comm_err_t = 0.0
+        self._comm_err_interval_s = 1.0  # rate-limit repeated transport errors
+
+    def _warn_comm(self, e):
+        now = time.time()
+        if now - self._last_comm_err_t >= self._comm_err_interval_s:
+            print(f"[motor-comm] {type(e).__name__}: {e}")
+            self._last_comm_err_t = now
 
     def set_wheels_percent(self, m1, m2, m3, m4):
         """
@@ -74,29 +80,35 @@ class MotorDriver:
         m3 = float(np.clip(m3, MIN_SPEED_PERCENT, MAX_SPEED_PERCENT))
         m4 = float(np.clip(m4, MIN_SPEED_PERCENT, MAX_SPEED_PERCENT))
 
-        # Try likely SparkyBot API variants in order.
-        # 1) set_motor(m1, m2, m3, m4)
+        # Try likely API variants; swallow transport-write failures and keep loop alive.
         try:
             self.bot.set_motor(m1, m2, m3, m4)
             return
-        except TypeError:
+        except AttributeError:
             pass
+        except Exception as e:
+            self._warn_comm(e)
+            return
 
-        # 2) set_motors(m1, m2, m3, m4)
         try:
             self.bot.set_motors(m1, m2, m3, m4)
             return
-        except (TypeError, AttributeError):
+        except AttributeError:
             pass
+        except Exception as e:
+            self._warn_comm(e)
+            return
 
-        # 3) set_motor("m1", m1, m2, m3, m4) (channel/mode first)
         try:
             self.bot.set_motor("m1", m1, m2, m3, m4)
             return
-        except TypeError:
+        except AttributeError:
             pass
+        except Exception as e:
+            self._warn_comm(e)
+            return
 
-        # Final diagnostic: report discovered signature for quick correction.
+        # Unsupported API shape (not a transport glitch)
         sig = "unknown"
         try:
             sig = str(inspect.signature(self.bot.set_motor))
@@ -107,7 +119,10 @@ class MotorDriver:
         )
 
     def stop(self):
-        self.set_wheels_percent(0, 0, 0, 0)
+        try:
+            self.set_wheels_percent(0, 0, 0, 0)
+        except Exception:
+            pass
 
 
 class PID:
