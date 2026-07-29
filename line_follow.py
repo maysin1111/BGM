@@ -60,15 +60,46 @@ class MotorDriver:
     """
 
     def __init__(self):
+        # Common pattern: instantiate robot/board object
+        # Adjust if your library differs.
         self.bot = sparkybotmini.SparkyBotMini()
-        self._last_comm_err_t = 0.0
-        self._comm_err_interval_s = 1.0  # rate-limit repeated transport errors
+        self.comm_failed = False  # latch so we don't spam the same error forever
 
-    def _warn_comm(self, e):
-        now = time.time()
-        if now - self._last_comm_err_t >= self._comm_err_interval_s:
-            print(f"[motor-comm] {type(e).__name__}: {e}")
-            self._last_comm_err_t = now
+    def _send_once(self, m1, m2, m3, m4):
+        """
+        Try likely SparkyBot API variants in order.
+        Raise an exception if all attempts fail.
+        """
+        # 1) set_motor(m1, m2, m3, m4)
+        try:
+            self.bot.set_motor(m1, m2, m3, m4)
+            return
+        except TypeError:
+            pass
+
+        # 2) set_motors(m1, m2, m3, m4)
+        try:
+            self.bot.set_motors(m1, m2, m3, m4)
+            return
+        except (TypeError, AttributeError):
+            pass
+
+        # 3) set_motor("m1", m1, m2, m3, m4) (channel/mode first)
+        try:
+            self.bot.set_motor("m1", m1, m2, m3, m4)
+            return
+        except TypeError:
+            pass
+
+        # Final diagnostic: report discovered signature for quick correction.
+        sig = "unknown"
+        try:
+            sig = str(inspect.signature(self.bot.set_motor))
+        except Exception:
+            pass
+        raise RuntimeError(
+            f"Unsupported motor API for SparkyBotMini. set_motor signature: {sig}"
+        )
 
     def set_wheels_percent(self, m1, m2, m3, m4):
         """
@@ -80,49 +111,24 @@ class MotorDriver:
         m3 = float(np.clip(m3, MIN_SPEED_PERCENT, MAX_SPEED_PERCENT))
         m4 = float(np.clip(m4, MIN_SPEED_PERCENT, MAX_SPEED_PERCENT))
 
-        # Try likely API variants; swallow transport-write failures and keep loop alive.
-        try:
-            self.bot.set_motor(m1, m2, m3, m4)
-            return
-        except AttributeError:
-            pass
-        except Exception as e:
-            self._warn_comm(e)
-            return
+        # If communication already failed, avoid repeated send attempts/spam.
+        if self.comm_failed:
+            raise RuntimeError("Motor communication is in failed state.")
 
         try:
-            self.bot.set_motors(m1, m2, m3, m4)
-            return
-        except AttributeError:
-            pass
+            self._send_once(m1, m2, m3, m4)
         except Exception as e:
-            self._warn_comm(e)
-            return
-
-        try:
-            self.bot.set_motor("m1", m1, m2, m3, m4)
-            return
-        except AttributeError:
-            pass
-        except Exception as e:
-            self._warn_comm(e)
-            return
-
-        # Unsupported API shape (not a transport glitch)
-        sig = "unknown"
-        try:
-            sig = str(inspect.signature(self.bot.set_motor))
-        except Exception:
-            pass
-        raise RuntimeError(
-            f"Unsupported motor API for SparkyBotMini. set_motor signature: {sig}"
-        )
+            self.comm_failed = True
+            raise RuntimeError(f"Motor send failed: {e}") from e
 
     def stop(self):
+        # If comms are failed, silently skip to avoid recursive/extra errors.
+        if self.comm_failed:
+            return
         try:
             self.set_wheels_percent(0, 0, 0, 0)
         except Exception:
-            pass
+            self.comm_failed = True
 
 
 class PID:
@@ -295,7 +301,11 @@ def main():
 
             if error is None:
                 if time.time() - last_seen_time > LOST_LINE_TIMEOUT_S:
-                    driver.stop()
+                    try:
+                        driver.stop()
+                    except Exception as e:
+                        print(f"Motor communication failed while stopping: {e}")
+                        break
                 cv2.putText(
                     debug,
                     "LINE LOST",
@@ -310,7 +320,12 @@ def main():
                 last_seen_time = time.time()
                 steer = pid.update(error)
                 steer = float(np.clip(steer, -1.0, 1.0))
-                apply_steering(driver, BASE_SPEED_PERCENT, steer)
+                try:
+                    apply_steering(driver, BASE_SPEED_PERCENT, steer)
+                except Exception as e:
+                    print(f"Motor communication failed: {e}")
+                    print("Check SparkyBot connection/port/power, then restart.")
+                    break
 
                 cv2.putText(
                     debug,
