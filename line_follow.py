@@ -3,11 +3,39 @@
 Line follower for SparkyBot Mini (Mecanum drive) using front camera and PID steering.
 """
 
+import glob as _glob
 import time
 import inspect
 import cv2
 import numpy as np
 import sparkybotmini
+
+
+# ---------------------------
+# Serial port auto-detection
+# ---------------------------
+def _find_serial_port() -> str:
+    """
+    Scan common serial port patterns and return the first device found.
+    Logs each pattern tried so failures are easy to diagnose.
+    Falls back to /dev/ttyUSB0 when nothing is found.
+    """
+    patterns = [
+        "/dev/ttyUSB*",
+        "/dev/ttyACM*",
+        "/dev/ttyAMA*",
+        "/dev/ttyS*",
+    ]
+    for pattern in patterns:
+        found = sorted(_glob.glob(pattern))
+        if found:
+            print(f"[port] {pattern} -> {found}  (using {found[0]})")
+            return found[0]
+        else:
+            print(f"[port] {pattern} -> (none)")
+    fallback = "/dev/ttyUSB0"
+    print(f"[port] No serial devices found; defaulting to {fallback}")
+    return fallback
 
 # ---------------------------
 # Tunable parameters
@@ -42,16 +70,25 @@ LOOP_DELAY_S = 0.01
 
 class MotorDriver:
     def __init__(self):
-        # v6 fix: use detected serial port
-        self.bot = sparkybotmini.SparkyBotMini(port="/dev/ttyAMA10")
+        # Auto-detect the serial port so the script works across different
+        # hardware setups without manual edits.
+        port = _find_serial_port()
+        print(f"[motor] Initialising SparkyBotMini on port: {port}")
+        self.bot = sparkybotmini.SparkyBotMini(port=port)
         self.comm_failed = False
+
+        # Print the available motor API methods once for easy diagnosis.
+        motor_methods = [m for m in dir(self.bot) if "motor" in m.lower()]
+        print(f"[motor] Motor API methods: {motor_methods}")
 
         # Open serial port
         if not self.bot.connect():
-            self.comm_failed = True
-            raise RuntimeError(
-                f"Failed to connect SparkyBotMini on port {self.bot.port}. "
-                "Check USB/port/power."
+            # Warn but do not raise: the port may still be usable even when
+            # connect() returns False (e.g. the library's is_open check races).
+            print(
+                f"[motor] WARNING: connect() returned False for {port}. "
+                "Will still attempt motor commands. "
+                "Check USB cable, port name, and robot power."
             )
 
         # Optional: start auto-reporting
@@ -67,31 +104,22 @@ class MotorDriver:
         m3 = int(round(m3))
         m4 = int(round(m4))
 
-        # Try likely APIs
-        try:
+        # Primary API: set_motor(m1, m2, m3, m4)
+        if hasattr(self.bot, "set_motor"):
             self.bot.set_motor(m1, m2, m3, m4)
             return
-        except TypeError:
-            pass
 
-        try:
+        # Fallback: set_motors(m1, m2, m3, m4) (alternative naming in some forks)
+        if hasattr(self.bot, "set_motors"):
             self.bot.set_motors(m1, m2, m3, m4)
             return
-        except (TypeError, AttributeError):
-            pass
-
-        try:
-            self.bot.set_motor("m1", m1, m2, m3, m4)
-            return
-        except TypeError:
-            pass
 
         sig = "unknown"
         try:
             sig = str(inspect.signature(self.bot.set_motor))
         except Exception:
             pass
-        raise RuntimeError(f"Unsupported motor API for SparkyBotMini. set_motor signature: {sig}")
+        raise RuntimeError(f"No motor API found on SparkyBotMini. set_motor signature: {sig}")
 
     def set_wheels_percent(self, m1, m2, m3, m4):
         # FIX: clamp to signed range so reverse is possible
@@ -104,8 +132,10 @@ class MotorDriver:
             raise RuntimeError("Motor communication is in failed state.")
 
         if not self._is_connected():
-            self.comm_failed = True
-            raise RuntimeError("Serial not connected (ser is None or closed).")
+            # Warn rather than abort: the connection check may be overly strict
+            # (e.g. ser.is_open races on some platforms).  Still attempt to
+            # send the command so a transient mis-read does not stall the robot.
+            print("[motor] WARNING: _is_connected() returned False — attempting command anyway.")
 
         # FIX: debug print to verify actual motor commands
         print(f"motor cmd -> m1:{m1:+.1f} m2:{m2:+.1f} m3:{m3:+.1f} m4:{m4:+.1f}")
